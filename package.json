@@ -13,6 +13,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "start": "node server/index.js",
+    "terrain": "node scripts/build-terrain.mjs",
     "serve": "npm run build && node server/index.js"
   },
   "dependencies": {
@@ -27,6 +28,7 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
+    "pngjs": "^7.0.0",
     "typescript": "^5.7.2",
     "vite": "^6.0.7"
   }

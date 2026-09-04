@@ -17,3 +17,6 @@
 
 - **Mistake:** Sampling 5,000 slopes independently inside small massif footprints produced piles of overlapping polygons; the first fix (shrinking areas to 200–6,000 m²) made them unreadably small.
   **Rule:** Place features with a spatial-hash packer (`SlopePacker`: centre distance ≥ r1 + r2 + gap) and size the area range from footprint capacity (m² per slope), not aesthetics alone. Weight clusters by usable land area. Give sub-pixel features a low-zoom point representation so density still reads from far out.
+
+- **Mistake:** Slope polygons placed at random points inside the land footprint with random orientation sat on ridges, reservoirs and flat ground and did not read as slope faces.
+  **Rule:** Synthetic features that represent terrain phenomena must be sampled from the terrain: bake a DEM slope/aspect grid (`scripts/build-terrain.mjs`), sample steep cells, orient polygons along the contour with the DEM aspect, and take elevation and angle from the DEM. Real relief in, synthetic hazard out.

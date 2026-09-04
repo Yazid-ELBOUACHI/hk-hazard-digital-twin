@@ -14,7 +14,8 @@ import {
   SlopeType,
   ValidationRecord,
 } from "@/core/types";
-import { HILL_CLUSTERS, HillCluster, samplePointInCluster, sampleUniformInCluster, walkInsideCluster, offsetM, distanceM } from "./geo";
+import { HILL_CLUSTERS, HillCluster, samplePointInCluster, sampleUniformInCluster, walkInsideCluster, offsetM, distanceM, pointInRing } from "./geo";
+import { TERRAIN_GRIDS, TerrainGrid } from "./terrainGrid";
 import { clamp, pick, range, rangeInt, rngFor } from "./random";
 
 /** Fixed game-time origin so all freshness/history math is deterministic. */
@@ -42,6 +43,89 @@ const SENSOR_KINDS: SensorKind[] = [
   "gnss-movement",
   "soil-moisture",
 ];
+
+// ---------- real-terrain sampler (baked DEM grids, see scripts/build-terrain.mjs) ----------
+
+function decodeB64(s: string): Uint8Array {
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+const x2lon = (x: number, z: number) => (x / 2 ** z) * 360 - 180;
+const y2lat = (y: number, z: number) => {
+  const n = Math.PI - (2 * Math.PI * y) / 2 ** z;
+  return (180 / Math.PI) * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+};
+
+export interface TerrainSample {
+  p: [number, number];
+  slopeDeg: number;
+  aspectDeg: number; // downhill bearing from north
+  elevM: number;
+}
+
+/**
+ * Samples hillside cells of one massif: only land cells at or above STEEP_MIN degrees, weighted
+ * toward steeper ground, so synthetic slope features sit on real slopes and face downhill.
+ */
+class TerrainSampler {
+  private static readonly STEEP_MIN = 16;
+  private slope: Uint8Array;
+  private aspect: Uint8Array;
+  private height: Uint8Array;
+  private cells: number[] = [];
+  private cum: number[] = [];
+  private total = 0;
+
+  constructor(private g: TerrainGrid, ring: [number, number][]) {
+    this.slope = decodeB64(g.slope);
+    this.aspect = decodeB64(g.aspect);
+    this.height = decodeB64(g.height);
+    for (let i = 0; i < g.cols * g.rows; i++) {
+      const s = this.slope[i];
+      if (s < TerrainSampler.STEEP_MIN) continue;
+      if (!pointInRing(this.centre(i), ring)) continue;
+      this.cells.push(i);
+      this.total += s - TerrainSampler.STEEP_MIN + 2;
+      this.cum.push(this.total);
+    }
+  }
+
+  get usable(): boolean {
+    return this.cells.length > 0;
+  }
+
+  private centre(i: number): [number, number] {
+    const { cols, px0, py0, z, ds } = this.g;
+    const q = i % cols;
+    const r = Math.floor(i / cols);
+    const px = px0 + 1 + q * ds + Math.floor(ds / 2);
+    const py = py0 + 1 + r * ds + Math.floor(ds / 2);
+    return [x2lon((px + 0.5) / 256, z), y2lat((py + 0.5) / 256, z)];
+  }
+
+  sample(rng: () => number): TerrainSample {
+    const t = rng() * this.total;
+    let lo = 0;
+    let hi = this.cum.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.cum[mid] < t) lo = mid + 1;
+      else hi = mid;
+    }
+    const i = this.cells[lo];
+    const c = this.centre(i);
+    // jitter within the cell (≈ ds source pixels)
+    const { ds, z } = this.g;
+    const pxSpan = ds / 256 / 2 ** z;
+    const p: [number, number] = [c[0] + (rng() - 0.5) * pxSpan * 360, c[1] + (rng() - 0.5) * pxSpan * 300];
+    return { p, slopeDeg: this.slope[i], aspectDeg: (this.aspect[i] / 255) * 360, elevM: this.height[i] * 4 };
+  }
+}
+
+const TERRAIN_BY_NAME = new Map(TERRAIN_GRIDS.map((g) => [g.name, g]));
 
 /** Largest vertex distance from the centroid, in metres — the disc the polygon is guaranteed to fit in. */
 function boundingRadiusM(centroid: [number, number], polygon: [number, number][]): number {
@@ -245,21 +329,37 @@ export function generateDataset(): Dataset {
   HILL_CLUSTERS.forEach((cluster, ci) => {
     const clusterAssets = assets.filter((a) => a.id.includes(`-${ci}-`));
     const n = Math.round((cluster.weight / totalWeight) * SLOPE_COUNT);
+    const grid = TERRAIN_BY_NAME.get(cluster.name);
+    const terrain = grid ? new TerrainSampler(grid, cluster.footprint) : null;
+    const onTerrain = !!terrain && terrain.usable;
     for (let i = 0; i < n; i++) {
       counter++;
       const rng = rngFor("slope", cluster.name, i);
       const id = slopeIdFor(cluster, counter, rng);
-      const aspectDeg = range(rng, 0, 360);
       // Slope feature footprint, log-uniform 600–15,000 m² (median ≈ 3,000): large enough to read on the
       // map at district zoom, small enough that the packer can keep them all apart.
       let areaM2 = Math.exp(range(rng, Math.log(600), Math.log(15000)));
 
-      // Placement: gaussian-ish around the massif centre first, then uniform across the footprint,
-      // always on land and never overlapping an already-placed slope (min-separation rejection).
+      // Placement: a real hillside cell from the DEM grid (steep ground, weighted steeper), the polygon
+      // laid along the contour with its downhill side on the DEM aspect; never overlapping a placed slope.
+      // Falls back to footprint sampling only if a massif has no baked terrain.
       let centroid: [number, number] | null = null;
       let polygon: [number, number][] = [];
+      let aspectDeg = range(rng, 0, 360);
+      let demSlope = range(rng, 18, 40);
+      let elevationM = cluster.baseElevation * range(rng, 0.25, 1);
       for (let attempt = 0; attempt < 90 && !centroid; attempt++) {
-        const cand = attempt < 12 ? samplePointInCluster(cluster, rng) : sampleUniformInCluster(cluster, rng);
+        let cand: [number, number];
+        if (onTerrain) {
+          const t = terrain!.sample(rng);
+          if (!pointInRing(t.p, cluster.footprint)) continue;
+          cand = t.p;
+          aspectDeg = t.aspectDeg;
+          demSlope = t.slopeDeg;
+          elevationM = t.elevM;
+        } else {
+          cand = attempt < 12 ? samplePointInCluster(cluster, rng) : sampleUniformInCluster(cluster, rng);
+        }
         const poly = makePolygon(cand, aspectDeg, areaM2, rng);
         const radiusM = boundingRadiusM(cand, poly);
         if (packer.fits(cand, radiusM)) {
@@ -272,7 +372,8 @@ export function generateDataset(): Dataset {
       }
       if (!centroid) continue; // footprint is full — skip rather than overlap
 
-      const slopeAngleDeg = range(rng, 22, 62);
+      // engineered faces are steeper than the surrounding natural ground
+      const slopeAngleDeg = clamp(demSlope + range(rng, 6, 24), 22, 65);
       const heightM = clamp(Math.sqrt(areaM2) * Math.tan((slopeAngleDeg * Math.PI) / 180) * range(rng, 0.3, 0.7), 4, 120);
       const susceptibilityRaw =
         0.28 * (slopeAngleDeg - 22) / 40 +
@@ -293,7 +394,7 @@ export function generateDataset(): Dataset {
         district: cluster.district,
         centroid,
         polygon,
-        elevationM: Math.round(cluster.baseElevation * range(rng, 0.25, 1)),
+        elevationM: Math.round(elevationM),
         heightM: Math.round(heightM),
         slopeAngleDeg: Math.round(slopeAngleDeg),
         areaM2: Math.round(areaM2),

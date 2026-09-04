@@ -23,8 +23,10 @@ Requires internet access (basemap/terrain tiles + fonts).
 
 ## What's inside
 
-- **Overview** — 3D Hong Kong, ~5,000 synthetic slopes placed only on upland land footprints
-  (never in the harbour), colored by risk (green→red, grey = insufficient data). Interactive
+- **Overview** — 3D Hong Kong, ~5,000 synthetic slopes placed on real hillsides: each massif has a
+  baked DEM grid (`npm run terrain` → `src/mock/terrainGrid.ts`) and slopes are sampled only on
+  ground ≥16°, oriented along the contour with the DEM aspect, never overlapping (min-separation
+  packer) and never in the harbour, colored by risk (green→red, grey = insufficient data). Interactive
   legend (click a class to isolate it, counts per class), grouped layer panel (hazard / exposure /
   evidence), light or dark vector basemap with 3D buildings, or satellite imagery (toggle), zoom / rotate /
   tilt / reset camera buttons, hover tooltips on every marker with a "Map symbols" legend, search (`/`), KPIs grouped by question (risk

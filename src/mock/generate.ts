@@ -17,6 +17,7 @@ import {
 import { HILL_CLUSTERS, HillCluster, samplePointInCluster, sampleUniformInCluster, walkInsideCluster, offsetM, distanceM, pointInRing } from "./geo";
 import { TERRAIN_GRIDS, TerrainGrid } from "./terrainGrid";
 import { clamp, pick, range, rangeInt, rngFor } from "./random";
+import { fetchRealSlopeShells, RealSlopeShell } from "@/live/csdi";
 
 /** Fixed game-time origin so all freshness/history math is deterministic. */
 export const GAME_EPOCH = Date.parse("2026-09-04T08:00:00Z");
@@ -126,6 +127,152 @@ class TerrainSampler {
 }
 
 const TERRAIN_BY_NAME = new Map(TERRAIN_GRIDS.map((g) => [g.name, g]));
+
+// ---------- point lookup into the baked DEM grids (for real slope locations) ----------
+
+const decodedGridCache = new Map<string, { slope: Uint8Array; aspect: Uint8Array; height: Uint8Array }>();
+
+function decodedGrid(g: TerrainGrid) {
+  let d = decodedGridCache.get(g.name);
+  if (!d) {
+    d = { slope: decodeB64(g.slope), aspect: decodeB64(g.aspect), height: decodeB64(g.height) };
+    decodedGridCache.set(g.name, d);
+  }
+  return d;
+}
+
+/** Real relief at a lon/lat, from whichever massif grid covers it (null outside all grids). */
+function terrainAt(p: [number, number]): { slopeDeg: number; aspectDeg: number; elevM: number } | null {
+  for (const g of TERRAIN_GRIDS) {
+    const px = ((p[0] + 180) / 360) * 2 ** g.z * 256;
+    const n = Math.asinh(Math.tan((p[1] * Math.PI) / 180));
+    const py = ((Math.PI - n) / (2 * Math.PI)) * 2 ** g.z * 256;
+    const q = Math.floor((px - g.px0 - 1) / g.ds);
+    const r = Math.floor((py - g.py0 - 1) / g.ds);
+    if (q < 0 || r < 0 || q >= g.cols || r >= g.rows) continue;
+    const d = decodedGrid(g);
+    const i = r * g.cols + q;
+    return { slopeDeg: d.slope[i], aspectDeg: (d.aspect[i] / 255) * 360, elevM: d.height[i] * 4 };
+  }
+  return null;
+}
+
+// ---------- real slope inventory (CEDD Catalogue of Slopes via CSDI) ----------
+//
+// When the fetch succeeds, the twin's slope inventory uses REAL registered slope polygons and
+// registration attributes (slope no., district, height, angle, maintenance party). All hazard
+// state layered on top — sensors, soil, risk, history — remains synthetic. If CSDI is
+// unreachable the generator falls back to the fully synthetic cluster placement below.
+
+let realShells: RealSlopeShell[] | null = null;
+
+/** Fetch the real inventory before the first getDataset() call. Returns false on fallback. */
+export async function prepareRealSlopes(): Promise<boolean> {
+  if (realShells) return true;
+  try {
+    const shells = await fetchRealSlopeShells();
+    if (shells.length < 500) throw new Error(`only ${shells.length} shells`);
+    realShells = shells;
+    return true;
+  } catch (err) {
+    console.warn("CSDI slope inventory unavailable — using synthetic slope placement.", err);
+    return false;
+  }
+}
+
+function titleCase(s: string): string {
+  return s.toLowerCase().replace(/(^|[\s,/(-])([a-z])/g, (_, a, b) => a + b.toUpperCase());
+}
+
+/** Feature-type letter of a registration number ("11SW-A/C123" → cut, F → fill, R → wall). */
+function slopeTypeFor(id: string, rng: () => number): SlopeType {
+  const m = id.match(/\/\s*([A-Z]+)/);
+  const code = m?.[1] ?? "";
+  if (code.startsWith("F")) return "fill";
+  if (code.startsWith("R")) return "retaining-wall";
+  if (code.startsWith("C")) return rng() < 0.25 ? "rock-cut" : "soil-cut";
+  return "natural";
+}
+
+/** Build twin slopes from real CEDD shells; synthetic enrichment is seeded per slope id. */
+function slopesFromShells(shells: RealSlopeShell[], assets: Asset[]): Slope[] {
+  // pre-bucket assets by cluster index (asset ids embed "-<clusterIndex>-")
+  const clusterAssets = HILL_CLUSTERS.map((_, ci) => assets.filter((a) => a.id.includes(`-${ci}-`)));
+  const slopes: Slope[] = [];
+  for (const shell of shells) {
+    const rng = rngFor("slope", shell.id);
+    const t = terrainAt(shell.centroid);
+    const slopeAngleDeg = shell.angleDeg > 0 ? clamp(shell.angleDeg, 10, 88) : Math.round(range(rng, 25, 55));
+    const heightM = clamp(shell.heightM, 3, 250);
+    const susceptibility = clamp(
+      0.28 * ((slopeAngleDeg - 22) / 40) +
+        0.22 * rng() +
+        0.2 * rng() * rng() +
+        0.15 * (heightM / 180) +
+        0.15 * rng(),
+      0.03,
+      0.97
+    );
+    const instrumented = rng() < 0.55 || susceptibility > 0.65;
+    const hasData = rng() > 0.07;
+
+    // nearest massif provides the synthetic exposure context (assets, base elevation)
+    let ci = 0;
+    let bestD = Infinity;
+    HILL_CLUSTERS.forEach((c, i) => {
+      const d = (c.lon - shell.centroid[0]) ** 2 + (c.lat - shell.centroid[1]) ** 2;
+      if (d < bestD) { bestD = d; ci = i; }
+    });
+    const nearby = clusterAssets[ci].filter(() => rng() < 0.22).slice(0, 4);
+
+    slopes.push({
+      id: shell.id,
+      name: titleCase(shell.location) || `${shell.district} slope`,
+      region: shell.region,
+      district: shell.district,
+      centroid: shell.centroid,
+      polygon: shell.polygon,
+      elevationM: Math.round(t?.elevM ?? HILL_CLUSTERS[ci].baseElevation * range(rng, 0.15, 0.7)),
+      heightM: Math.round(heightM),
+      slopeAngleDeg: Math.round(slopeAngleDeg),
+      areaM2: shell.areaM2,
+      aspectDeg: Math.round(t?.aspectDeg ?? range(rng, 0, 360)),
+      slopeType: slopeTypeFor(shell.id, rng),
+      geology: pick(rng, GEOLOGIES),
+      soil: {
+        cohesionKPa: Math.round(range(rng, 2, 24)),
+        frictionAngleDeg: Math.round(range(rng, 26, 42)),
+        permeability: pick(rng, ["low", "medium", "high"] as const),
+        saturationBase: range(rng, 0.25, 0.6),
+      },
+      drainage: {
+        type: pick(rng, ["surface-channels", "raking-drains", "catchpits", "none"] as const),
+        condition: range(rng, 0.35, 1),
+        lastCleared: isoDaysAgo(rangeInt(rng, 20, 700)),
+      },
+      vegetationCover: range(rng, 0.05, 0.95),
+      mitigations: makeMitigations(rng, susceptibility),
+      nearbyAssetIds: nearby.map((a) => a.id),
+      sensors: makeSensors(shell.id, rng, instrumented),
+      history: makeHistory(rng, susceptibility),
+      freshness: {
+        sensor: new Date(GAME_EPOCH - rangeInt(rng, 1, 30) * 60_000).toISOString(),
+        rainfall: new Date(GAME_EPOCH - rangeInt(rng, 2, 15) * 60_000).toISOString(),
+        geometry: isoDaysAgo(rangeInt(rng, 5, 900)),
+        inspection: isoDaysAgo(rangeInt(rng, 10, 720)),
+        simulation: new Date(GAME_EPOCH - rangeInt(rng, 10, 2000) * 60_000).toISOString(),
+        record: isoDaysAgo(rangeInt(rng, 1, 60)),
+      },
+      susceptibility,
+      populationNearby: Math.round(
+        Math.exp(range(rng, Math.log(15), Math.log(1800))) + nearby.filter((a) => a.kind === "building").length * range(rng, 80, 400)
+      ),
+      hasData,
+      isSynthetic: true, // hazard state is synthetic; geometry & registration are CEDD
+    });
+  }
+  return slopes;
+}
 
 /** Largest vertex distance from the centroid, in metres — the disc the polygon is guaranteed to fit in. */
 function boundingRadiusM(centroid: [number, number], polygon: [number, number][]): number {
@@ -324,9 +471,14 @@ export function generateDataset(): Dataset {
     assets.push(...generateAssetsFor(cluster, ci));
   });
 
+  // Preferred path: real CEDD slope polygons (prepared by prepareRealSlopes() at boot).
+  if (realShells?.length) {
+    slopes.push(...slopesFromShells(realShells, assets));
+  }
+
   let counter = 0;
   const packer = new SlopePacker();
-  HILL_CLUSTERS.forEach((cluster, ci) => {
+  if (!slopes.length) HILL_CLUSTERS.forEach((cluster, ci) => {
     const clusterAssets = assets.filter((a) => a.id.includes(`-${ci}-`));
     const n = Math.round((cluster.weight / totalWeight) * SLOPE_COUNT);
     const grid = TERRAIN_BY_NAME.get(cluster.name);

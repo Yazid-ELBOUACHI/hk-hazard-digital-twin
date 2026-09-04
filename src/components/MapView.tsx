@@ -463,7 +463,7 @@ export default function MapView() {
           .setHTML(
             `<div style="font-family:var(--mono);font-weight:600">${p.id}</div>` +
               `<div style="color:${p.color};font-weight:700;text-transform:uppercase;font-size:10px;letter-spacing:1px">${p.cat} · ${p.score}/100</div>` +
-              `<div style="color:#6d7a8c;font-size:10px">${p.district} · confidence ${Math.round(p.conf * 100)}% · synthetic</div>`
+              `<div style="color:#6d7a8c;font-size:10px">${p.district} · confidence ${Math.round(p.conf * 100)}% · synthetic risk · CEDD geometry</div>`
           )
           .addTo(map);
       });

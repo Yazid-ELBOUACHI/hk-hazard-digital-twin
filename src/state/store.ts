@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 import { registry } from "@/core/registry";
-import { GAME_EPOCH } from "@/mock/generate";
+import { GAME_EPOCH, prepareRealSlopes } from "@/mock/generate";
 import { DEFAULT_PARAMS } from "@/mock/MockSimulationProvider";
 import type {
   Asset,
@@ -161,6 +161,8 @@ export const useStore = create<AppState>((set, get) => ({
   animSpeed: 1,
 
   async init() {
+    // real CEDD slope inventory must be in place before the registry builds the dataset
+    await prepareRealSlopes();
     const [slopes, assets, incidents] = await Promise.all([
       registry.slopes.getAll(),
       registry.assets.getAll(),

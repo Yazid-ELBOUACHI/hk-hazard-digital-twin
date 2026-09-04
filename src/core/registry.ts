@@ -68,4 +68,19 @@ function buildRegistry(): ServiceRegistry {
   };
 }
 
-export const registry: ServiceRegistry = buildRegistry();
+// Built lazily on first use so the real CSDI slope inventory can be fetched first
+// (store.init() awaits prepareRealSlopes() before touching the registry).
+let built: ServiceRegistry | null = null;
+const ensure = (): ServiceRegistry => (built ??= buildRegistry());
+
+export const registry: ServiceRegistry = {
+  get slopes() { return ensure().slopes; },
+  get sensors() { return ensure().sensors; },
+  get weather() { return ensure().weather; },
+  get incidents() { return ensure().incidents; },
+  get assets() { return ensure().assets; },
+  get interventions() { return ensure().interventions; },
+  get simulation() { return ensure().simulation; },
+  get validation() { return ensure().validation; },
+  get risk() { return ensure().risk; },
+};

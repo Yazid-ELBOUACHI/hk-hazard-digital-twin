@@ -14,7 +14,7 @@ import {
   SlopeType,
   ValidationRecord,
 } from "@/core/types";
-import { HILL_CLUSTERS, HillCluster, samplePointInCluster, walkInsideCluster, offsetM } from "./geo";
+import { HILL_CLUSTERS, HillCluster, samplePointInCluster, sampleUniformInCluster, walkInsideCluster, offsetM, distanceM } from "./geo";
 import { clamp, pick, range, rangeInt, rngFor } from "./random";
 
 /** Fixed game-time origin so all freshness/history math is deterministic. */
@@ -42,6 +42,53 @@ const SENSOR_KINDS: SensorKind[] = [
   "gnss-movement",
   "soil-moisture",
 ];
+
+/** Largest vertex distance from the centroid, in metres — the disc the polygon is guaranteed to fit in. */
+function boundingRadiusM(centroid: [number, number], polygon: [number, number][]): number {
+  let r = 0;
+  for (const p of polygon) r = Math.max(r, distanceM(centroid, p));
+  return r;
+}
+
+/**
+ * Spatial hash that keeps slope footprints apart: two slopes may not be closer (centre to centre)
+ * than the sum of their bounding radii plus a clear gap, so no polygon ever overlaps another.
+ */
+class SlopePacker {
+  private static readonly GAP_M = 12;
+  private static readonly CELL_DEG = 0.004; // ≈ 420 m, larger than any slope diameter + gap
+  private cells = new Map<string, { p: [number, number]; r: number }[]>();
+
+  private key(cx: number, cy: number): string {
+    return `${cx}:${cy}`;
+  }
+
+  private cellOf(p: [number, number]): [number, number] {
+    return [Math.floor(p[0] / SlopePacker.CELL_DEG), Math.floor(p[1] / SlopePacker.CELL_DEG)];
+  }
+
+  fits(p: [number, number], r: number): boolean {
+    const [cx, cy] = this.cellOf(p);
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const bucket = this.cells.get(this.key(cx + dx, cy + dy));
+        if (!bucket) continue;
+        for (const o of bucket) {
+          if (distanceM(p, o.p) < r + o.r + SlopePacker.GAP_M) return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  add(p: [number, number], r: number): void {
+    const [cx, cy] = this.cellOf(p);
+    const k = this.key(cx, cy);
+    const bucket = this.cells.get(k);
+    if (bucket) bucket.push({ p, r });
+    else this.cells.set(k, [{ p, r }]);
+  }
+}
 
 function isoDaysAgo(days: number): string {
   return new Date(GAME_EPOCH - days * 86400_000).toISOString();
@@ -194,6 +241,7 @@ export function generateDataset(): Dataset {
   });
 
   let counter = 0;
+  const packer = new SlopePacker();
   HILL_CLUSTERS.forEach((cluster, ci) => {
     const clusterAssets = assets.filter((a) => a.id.includes(`-${ci}-`));
     const n = Math.round((cluster.weight / totalWeight) * SLOPE_COUNT);
@@ -201,12 +249,31 @@ export function generateDataset(): Dataset {
       counter++;
       const rng = rngFor("slope", cluster.name, i);
       const id = slopeIdFor(cluster, counter, rng);
-      // gaussian-ish placement around the massif centre, clipped to its land footprint (never in the sea)
-      const centroid: [number, number] = samplePointInCluster(cluster, rng);
       const aspectDeg = range(rng, 0, 360);
-      const areaM2 = range(rng, 900, 42000);
+      // Slope feature footprint, log-uniform 600–15,000 m² (median ≈ 3,000): large enough to read on the
+      // map at district zoom, small enough that the packer can keep them all apart.
+      let areaM2 = Math.exp(range(rng, Math.log(600), Math.log(15000)));
+
+      // Placement: gaussian-ish around the massif centre first, then uniform across the footprint,
+      // always on land and never overlapping an already-placed slope (min-separation rejection).
+      let centroid: [number, number] | null = null;
+      let polygon: [number, number][] = [];
+      for (let attempt = 0; attempt < 90 && !centroid; attempt++) {
+        const cand = attempt < 12 ? samplePointInCluster(cluster, rng) : sampleUniformInCluster(cluster, rng);
+        const poly = makePolygon(cand, aspectDeg, areaM2, rng);
+        const radiusM = boundingRadiusM(cand, poly);
+        if (packer.fits(cand, radiusM)) {
+          packer.add(cand, radiusM);
+          centroid = cand;
+          polygon = poly;
+        } else if (attempt % 30 === 29) {
+          areaM2 *= 0.7; // crowded massif: try a smaller feature before giving up
+        }
+      }
+      if (!centroid) continue; // footprint is full — skip rather than overlap
+
       const slopeAngleDeg = range(rng, 22, 62);
-      const heightM = clamp(Math.sqrt(areaM2) * Math.tan((slopeAngleDeg * Math.PI) / 180) * range(rng, 0.25, 0.6), 6, 180);
+      const heightM = clamp(Math.sqrt(areaM2) * Math.tan((slopeAngleDeg * Math.PI) / 180) * range(rng, 0.3, 0.7), 4, 120);
       const susceptibilityRaw =
         0.28 * (slopeAngleDeg - 22) / 40 +
         0.22 * rng() +
@@ -225,7 +292,7 @@ export function generateDataset(): Dataset {
         region: cluster.region,
         district: cluster.district,
         centroid,
-        polygon: makePolygon(centroid, aspectDeg, areaM2, rng),
+        polygon,
         elevationM: Math.round(cluster.baseElevation * range(rng, 0.25, 1)),
         heightM: Math.round(heightM),
         slopeAngleDeg: Math.round(slopeAngleDeg),

@@ -49,9 +49,9 @@ const SATELLITE_STYLE: StyleSpecification = {
 const DEM_TILES = ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"];
 
 /** Layers that belong to the twin (kept across basemap switches). */
-const OWN_SOURCE_IDS = ["dem", "hillshadeDem", "slopes", "roads", "buildings", "drainage", "incidents", "sensors", "mitigated", "historical", "rainfall-pts", "flood", "runout", "runout-front", "selected"];
+const OWN_SOURCE_IDS = ["dem", "hillshadeDem", "slopes", "slopes-pts", "roads", "buildings", "drainage", "incidents", "sensors", "mitigated", "historical", "rainfall-pts", "flood", "runout", "runout-front", "selected"];
 const OWN_LAYER_IDS = [
-  "flood-fill", "flood-line", "rain-heat", "slopes-fill", "slopes-line", "uncertainty-fill", "roads-line", "buildings-pt", "drainage-pt",
+  "flood-fill", "flood-line", "rain-heat", "slopes-pt", "slopes-fill", "slopes-line", "uncertainty-fill", "roads-line", "buildings-pt", "drainage-pt",
   "mitigated-pt", "historical-pt", "sensors-pt", "incidents-pt", "selected-line", "runout-fill", "runout-line", "runout-front-pt",
 ];
 
@@ -174,6 +174,19 @@ function incidentFC(incidents: Incident[]): any {
 
 const EMPTY_FC: any = { type: "FeatureCollection", features: [] };
 
+/** Centroid version of the slope collection, carrying the same colour/category properties. */
+function slopePointFC(polyFC: any, slopes: Slope[]): any {
+  const byId = new Map(slopes.map((s) => [s.id, s.centroid]));
+  return {
+    type: "FeatureCollection",
+    features: polyFC.features.map((f: any) => ({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: byId.get(f.properties.id) },
+      properties: f.properties,
+    })),
+  };
+}
+
 /** Add terrain sources, hillshade (+3D buildings on vector basemaps) and every twin source/layer. */
 function mountOwnLayers(map: maplibregl.Map) {
   const st = useStore.getState();
@@ -188,6 +201,7 @@ function mountOwnLayers(map: maplibregl.Map) {
   if (map.getSource("openmaptiles")) map.addLayer(buildings3dFor(st.basemap), firstSymbol);
 
   map.addSource("slopes", { type: "geojson", data: slopeFC(st.slopes, st.assessments, st.stormMode, st.stormHorizonH, st.gameTime) });
+  map.addSource("slopes-pts", { type: "geojson", data: slopePointFC(slopeFC(st.slopes, st.assessments, st.stormMode, st.stormHorizonH, st.gameTime), st.slopes) });
   map.addSource("roads", { type: "geojson", data: assetFC(st.assets, ["road", "emergency-route"]) });
   map.addSource("buildings", { type: "geojson", data: assetFC(st.assets, ["building", "hospital", "school", "railway"]) });
   map.addSource("drainage", { type: "geojson", data: assetFC(st.assets, ["drainage", "utility"]) });
@@ -238,13 +252,24 @@ function mountOwnLayers(map: maplibregl.Map) {
     },
   });
 
+  // Far out, individual slope features are sub-pixel: show them as risk-coloured points until
+  // zoom 12.5, then hand over to the true polygons (which are drawn from zoom 11.5 so the two cross-fade).
   map.addLayer({
-    id: "slopes-fill", type: "fill", source: "slopes",
-    paint: { "fill-color": ["get", "color"], "fill-opacity": ["interpolate", ["linear"], ["zoom"], 9, 0.62, 14, 0.48] },
+    id: "slopes-pt", type: "circle", source: "slopes-pts", maxzoom: 12.5,
+    paint: {
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 2.6, 11, 4, 12.5, 6],
+      "circle-color": ["get", "color"],
+      "circle-opacity": ["interpolate", ["linear"], ["zoom"], 11.5, 0.9, 12.5, 0],
+      "circle-stroke-width": 0.6, "circle-stroke-color": "rgba(0,0,0,0.35)",
+    },
   });
   map.addLayer({
-    id: "slopes-line", type: "line", source: "slopes",
-    paint: { "line-color": ["get", "color"], "line-width": ["interpolate", ["linear"], ["zoom"], 10, 0.5, 14, 1.6], "line-opacity": 0.95 },
+    id: "slopes-fill", type: "fill", source: "slopes", minzoom: 11.5,
+    paint: { "fill-color": ["get", "color"], "fill-opacity": ["interpolate", ["linear"], ["zoom"], 11.5, 0.2, 12.5, 0.62, 15, 0.5] },
+  });
+  map.addLayer({
+    id: "slopes-line", type: "line", source: "slopes", minzoom: 11.5,
+    paint: { "line-color": ["get", "color"], "line-width": ["interpolate", ["linear"], ["zoom"], 12, 0.8, 15, 1.8], "line-opacity": 0.95 },
   });
   map.addLayer({
     id: "uncertainty-fill", type: "fill", source: "slopes", layout: { visibility: "none" },
@@ -380,7 +405,14 @@ export default function MapView() {
         useStore.getState().selectSlope(id);
         useStore.getState().flyToSlope(id);
       });
-      map.on("mousemove", "slopes-fill", (e) => {
+      map.on("click", "slopes-pt", (e) => {
+        const f = e.features?.[0];
+        if (!f) return;
+        const id = f.properties?.id as string;
+        useStore.getState().selectSlope(id);
+        useStore.getState().flyToSlope(id);
+      });
+      for (const hoverLayer of ["slopes-fill", "slopes-pt"]) map.on("mousemove", hoverLayer, (e) => {
         map.getCanvas().style.cursor = "pointer";
         const f = e.features?.[0];
         if (!f) return;
@@ -397,7 +429,7 @@ export default function MapView() {
           )
           .addTo(map);
       });
-      map.on("mouseleave", "slopes-fill", () => {
+      for (const hoverLayer of ["slopes-fill", "slopes-pt"]) map.on("mouseleave", hoverLayer, () => {
         map.getCanvas().style.cursor = "";
         popupRef.current?.remove();
       });
@@ -481,8 +513,10 @@ export default function MapView() {
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !loadedRef.current) return;
+    const fc = slopeFC(slopes, assessments, stormMode, stormHorizonH, useStore.getState().gameTime);
     const src = map.getSource("slopes") as maplibregl.GeoJSONSource | undefined;
-    src?.setData(slopeFC(slopes, assessments, stormMode, stormHorizonH, useStore.getState().gameTime));
+    src?.setData(fc);
+    (map.getSource("slopes-pts") as maplibregl.GeoJSONSource | undefined)?.setData(slopePointFC(fc, slopes));
   }, [slopes, assessments, stormMode, stormHorizonH]);
 
   // ---- layer visibility ----
@@ -612,6 +646,7 @@ function applyVisibility(map: maplibregl.Map, layers: ReturnType<typeof useStore
   const safe = (id: string, on: boolean) => {
     if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", vis(on));
   };
+  safe("slopes-pt", layers.slopeRisk);
   safe("slopes-fill", layers.slopeRisk);
   safe("slopes-line", layers.slopeRisk);
   safe("uncertainty-fill", layers.uncertainty);
@@ -632,7 +667,7 @@ function applyRiskFilter(map: maplibregl.Map, filter: ReturnType<typeof useStore
     .filter(([, on]) => on)
     .map(([c]) => c);
   const expr: any = ["in", ["get", "cat"], ["literal", cats]];
-  for (const id of ["slopes-fill", "slopes-line", "uncertainty-fill"]) {
+  for (const id of ["slopes-pt", "slopes-fill", "slopes-line", "uncertainty-fill"]) {
     if (map.getLayer(id)) map.setFilter(id, expr);
   }
 }

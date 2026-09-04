@@ -14,3 +14,6 @@
 
 - **Mistake:** `populationNearby` summed the service catchments of linked assets (hospitals 10–40k), so "people near at-risk slopes" reached millions; the linear risk sum also put the median slope in "elevated" on any wet day.
   **Rule:** Sanity-check every headline number against a real-world ceiling (HK ≈ 7.5 M people; most registered slopes are low/moderate). Keep direct exposure (residents within reach) separate from indirect exposure (service catchments), and calibrate the score distribution, not just the ordering.
+
+- **Mistake:** Sampling 5,000 slopes independently inside small massif footprints produced piles of overlapping polygons; the first fix (shrinking areas to 200–6,000 m²) made them unreadably small.
+  **Rule:** Place features with a spatial-hash packer (`SlopePacker`: centre distance ≥ r1 + r2 + gap) and size the area range from footprint capacity (m² per slope), not aesthetics alone. Weight clusters by usable land area. Give sub-pixel features a low-zoom point representation so density still reads from far out.

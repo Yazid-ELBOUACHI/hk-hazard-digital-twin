@@ -23,7 +23,7 @@ export interface HillCluster {
 
 export const HILL_CLUSTERS: HillCluster[] = [
   {
-    name: "Victoria Peak", region: "HK Island", district: "Central & Western", lon: 114.150, lat: 22.271, spreadDeg: 0.012, weight: 9, baseElevation: 320,
+    name: "Victoria Peak", region: "HK Island", district: "Central & Western", lon: 114.150, lat: 22.271, spreadDeg: 0.012, weight: 7, baseElevation: 320,
     footprint: [[114.131, 22.270], [114.136, 22.279], [114.150, 22.282], [114.165, 22.280], [114.172, 22.272], [114.165, 22.262], [114.150, 22.259], [114.136, 22.263]],
   },
   {
@@ -31,11 +31,11 @@ export const HILL_CLUSTERS: HillCluster[] = [
     footprint: [[114.195, 22.275], [114.200, 22.283], [114.215, 22.284], [114.227, 22.278], [114.229, 22.266], [114.220, 22.256], [114.205, 22.258], [114.195, 22.265]],
   },
   {
-    name: "Pok Fu Lam Uplands", region: "HK Island", district: "Southern", lon: 114.145, lat: 22.255, spreadDeg: 0.009, weight: 6, baseElevation: 210,
+    name: "Pok Fu Lam Uplands", region: "HK Island", district: "Southern", lon: 114.145, lat: 22.255, spreadDeg: 0.009, weight: 3, baseElevation: 210,
     footprint: [[114.133, 22.256], [114.140, 22.262], [114.150, 22.259], [114.158, 22.254], [114.155, 22.250], [114.145, 22.248], [114.136, 22.250]],
   },
   {
-    name: "Lion Rock", region: "Kowloon", district: "Wong Tai Sin", lon: 114.188, lat: 22.351, spreadDeg: 0.011, weight: 8, baseElevation: 300,
+    name: "Lion Rock", region: "Kowloon", district: "Wong Tai Sin", lon: 114.188, lat: 22.351, spreadDeg: 0.011, weight: 6, baseElevation: 300,
     footprint: [[114.170, 22.345], [114.175, 22.358], [114.190, 22.362], [114.205, 22.358], [114.205, 22.345], [114.190, 22.340], [114.175, 22.340]],
   },
   {
@@ -43,11 +43,11 @@ export const HILL_CLUSTERS: HillCluster[] = [
     footprint: [[114.205, 22.330], [114.208, 22.345], [114.222, 22.350], [114.235, 22.345], [114.238, 22.332], [114.228, 22.322], [114.212, 22.322]],
   },
   {
-    name: "Beacon Hill", region: "Kowloon", district: "Sham Shui Po", lon: 114.164, lat: 22.349, spreadDeg: 0.010, weight: 6, baseElevation: 260,
+    name: "Beacon Hill", region: "Kowloon", district: "Sham Shui Po", lon: 114.164, lat: 22.349, spreadDeg: 0.010, weight: 4, baseElevation: 260,
     footprint: [[114.150, 22.343], [114.153, 22.355], [114.165, 22.360], [114.178, 22.355], [114.178, 22.343], [114.165, 22.338], [114.152, 22.338]],
   },
   {
-    name: "Tai Mo Shan South", region: "NT West", district: "Tsuen Wan", lon: 114.120, lat: 22.397, spreadDeg: 0.020, weight: 10, baseElevation: 520,
+    name: "Tai Mo Shan South", region: "NT West", district: "Tsuen Wan", lon: 114.120, lat: 22.397, spreadDeg: 0.020, weight: 13, baseElevation: 520,
     footprint: [[114.090, 22.380], [114.095, 22.405], [114.110, 22.420], [114.135, 22.422], [114.150, 22.410], [114.150, 22.385], [114.130, 22.372], [114.105, 22.372]],
   },
   {
@@ -55,7 +55,7 @@ export const HILL_CLUSTERS: HillCluster[] = [
     footprint: [[113.938, 22.380], [113.940, 22.400], [113.952, 22.412], [113.968, 22.408], [113.972, 22.392], [113.965, 22.378], [113.950, 22.376]],
   },
   {
-    name: "Kam Tin Hills", region: "NT West", district: "Yuen Long", lon: 114.067, lat: 22.439, spreadDeg: 0.016, weight: 5, baseElevation: 220,
+    name: "Kam Tin Hills", region: "NT West", district: "Yuen Long", lon: 114.067, lat: 22.439, spreadDeg: 0.016, weight: 8, baseElevation: 220,
     footprint: [[114.040, 22.425], [114.045, 22.450], [114.065, 22.460], [114.090, 22.455], [114.095, 22.435], [114.080, 22.420], [114.055, 22.418]],
   },
   {
@@ -67,15 +67,15 @@ export const HILL_CLUSTERS: HillCluster[] = [
     footprint: [[114.190, 22.478], [114.195, 22.494], [114.215, 22.499], [114.235, 22.494], [114.238, 22.485], [114.225, 22.474], [114.205, 22.470]],
   },
   {
-    name: "Sai Kung Peninsula", region: "NT East", district: "Sai Kung", lon: 114.325, lat: 22.415, spreadDeg: 0.022, weight: 8, baseElevation: 300,
+    name: "Sai Kung Peninsula", region: "NT East", district: "Sai Kung", lon: 114.325, lat: 22.415, spreadDeg: 0.022, weight: 11, baseElevation: 300,
     footprint: [[114.292, 22.402], [114.296, 22.420], [114.315, 22.432], [114.345, 22.430], [114.360, 22.415], [114.352, 22.402], [114.330, 22.400], [114.310, 22.400]],
   },
   {
-    name: "Tai Po Uplands", region: "NT East", district: "Tai Po", lon: 114.158, lat: 22.454, spreadDeg: 0.014, weight: 6, baseElevation: 280,
+    name: "Tai Po Uplands", region: "NT East", district: "Tai Po", lon: 114.158, lat: 22.454, spreadDeg: 0.014, weight: 8, baseElevation: 280,
     footprint: [[114.135, 22.440], [114.138, 22.462], [114.155, 22.472], [114.178, 22.468], [114.182, 22.452], [114.170, 22.440], [114.150, 22.436]],
   },
   {
-    name: "Lantau Peak", region: "Lantau", district: "Islands", lon: 113.935, lat: 22.256, spreadDeg: 0.018, weight: 7, baseElevation: 560,
+    name: "Lantau Peak", region: "Lantau", district: "Islands", lon: 113.935, lat: 22.256, spreadDeg: 0.018, weight: 9, baseElevation: 560,
     footprint: [[113.905, 22.245], [113.912, 22.262], [113.930, 22.275], [113.955, 22.272], [113.965, 22.258], [113.960, 22.244], [113.940, 22.238], [113.920, 22.238]],
   },
   {
@@ -185,4 +185,15 @@ export function walkInsideCluster(cluster: HillCluster, rng: () => number, steps
     line.push(next);
   }
   return line;
+}
+
+/** Uniform sample inside the footprint (no centre bias) — used when packing slopes without overlap. */
+export function sampleUniformInCluster(cluster: HillCluster, rng: () => number): LonLat {
+  const ring = cluster.footprint;
+  const [minX, minY, maxX, maxY] = bbox(ring);
+  for (let i = 0; i < 200; i++) {
+    const p: LonLat = [minX + rng() * (maxX - minX), minY + rng() * (maxY - minY)];
+    if (pointInRing(p, ring)) return p;
+  }
+  return ringCentroid(ring);
 }

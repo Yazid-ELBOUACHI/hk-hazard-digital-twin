@@ -32,6 +32,14 @@ const LAYER_GROUPS: { title: string; items: { key: keyof LayerState; label: stri
       { key: "incidents", label: "Incidents", hint: "Active incidents (size = severity)" },
     ],
   },
+  {
+    title: "Live HK data · CSDI",
+    items: [
+      { key: "csdiSlopes", label: "Registered slopes", hint: "REAL DATA — CEDD Catalogue of Slopes (61,000+ registered man-made slopes). Zoom in to load the polygons around your view." },
+      { key: "csdiLandslides", label: "Landslide history", hint: "REAL DATA — CEDD landslide incident records (~11,000 points with dates and locations)" },
+      { key: "csdiBlackspots", label: "Flood blackspots", hint: "REAL DATA — DSD flooding blackspots currently on record, with causes and mitigation status" },
+    ],
+  },
 ];
 
 const LEGEND: { c: RiskCategory; label: string }[] = [
@@ -101,6 +109,9 @@ export default function MapOverlays() {
   if (layers.historicalLandslides) symbolRows.push({ label: "Past failure", color: "#e04a3a", shape: "ring", hint: "Historical landslide on record" });
   if (layers.drainage) symbolRows.push({ label: "Drainage / utility", color: "#38b6d8", shape: "dot", hint: "Drainage culvert or utility asset" });
   if (layers.floodZones) symbolRows.push({ label: "Indicative flood zone", color: "#3d8bfd", shape: "area", hint: "Ponding area around drainage assets" });
+  if (layers.csdiSlopes) symbolRows.push({ label: "Registered slope (CEDD, live)", color: "#18b8a6", shape: "area", hint: "Real Catalogue of Slopes polygon — zoom in to load" });
+  if (layers.csdiLandslides) symbolRows.push({ label: "Past landslide (CEDD, live)", color: "#ff9d42", shape: "dot", hint: "Real landslide incident record" });
+  if (layers.csdiBlackspots) symbolRows.push({ label: "Flood blackspot (DSD, live)", color: "#63b3ff", shape: "ring", hint: "Real DSD flooding blackspot" });
 
   // refresh projection colors while storm mode is on
   useEffect(() => {

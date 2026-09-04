@@ -52,6 +52,17 @@ Requires internet access (basemap/terrain tiles + fonts).
 - **Ask the Twin** — chat interface (streamed answers, thinking indicator, slope chips that open
   the Command Center) over rule-based Q&A on the structured twin state.
 - **Roles** — Public / Engineer / Emergency Manager / Admin switcher.
+- **Live HK data · CSDI** (`src/live/csdi.ts`) — three REAL layers from the HK Common Spatial
+  Data Infrastructure (portal.csdi.gov.hk) ArcGIS REST API, toggleable in the layer panel and
+  labelled "LIVE DATA" in their tooltips:
+  - *Registered slopes* — CEDD Catalogue of Slopes, 61,000+ man-made slope polygons with slope
+    number, height, angle and maintenance party; loaded per viewport (zoom ≥ 12, 3,000/page).
+  - *Landslide history* — CEDD landslide incident records, ~11,000 points with dates,
+    feature type and slope cross-references; fetched whole via paging, cached.
+  - *Flood blackspots* — DSD flooding blackspots with causes and mitigation status.
+  CSDI sends permissive CORS headers, so the browser calls the API directly — no key, no proxy.
+  Dataset endpoints were discovered through the geoportal metadata API
+  (`/geoportal/rest/metadata/item/<dataset_id>`).
 
 ## Architecture
 

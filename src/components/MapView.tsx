@@ -12,6 +12,7 @@ import { registry } from "@/core/registry";
 import { HK_CENTER } from "@/mock/geo";
 import { RISK_COLORS, Slope, RiskAssessment, Asset, Incident } from "@/core/types";
 import { offsetM } from "@/mock/geo";
+import { fetchSlopesInBbox, fetchBlackspots, fetchLandslides } from "@/live/csdi";
 
 const DARK_STYLE_URL = "https://tiles.openfreemap.org/styles/dark";
 const LIGHT_STYLE_URL = "https://tiles.openfreemap.org/styles/positron";
@@ -49,10 +50,14 @@ const SATELLITE_STYLE: StyleSpecification = {
 const DEM_TILES = ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"];
 
 /** Layers that belong to the twin (kept across basemap switches). */
-const OWN_SOURCE_IDS = ["dem", "hillshadeDem", "slopes", "slopes-pts", "roads", "buildings", "drainage", "incidents", "sensors", "mitigated", "historical", "rainfall-pts", "flood", "runout", "runout-front", "selected"];
+const OWN_SOURCE_IDS = [
+  "dem", "hillshadeDem", "slopes", "slopes-pts", "roads", "buildings", "drainage", "incidents", "sensors", "mitigated", "historical", "rainfall-pts", "flood",
+  "runout", "runout-front", "selected", "csdi-slopes", "csdi-blackspots", "csdi-landslides",
+];
 const OWN_LAYER_IDS = [
-  "flood-fill", "flood-line", "rain-heat", "slopes-pt", "slopes-fill", "slopes-line", "uncertainty-fill", "roads-line", "buildings-pt", "drainage-pt",
-  "mitigated-pt", "historical-pt", "sensors-pt", "incidents-pt", "selected-line", "runout-fill", "runout-line", "runout-front-pt",
+  "flood-fill", "flood-line", "rain-heat", "csdi-slopes-fill", "csdi-slopes-line", "slopes-pt", "slopes-fill", "slopes-line", "uncertainty-fill", "roads-line",
+  "buildings-pt", "drainage-pt", "mitigated-pt", "historical-pt", "sensors-pt", "incidents-pt", "csdi-landslides-pt", "csdi-blackspots-pt",
+  "selected-line", "runout-fill", "runout-line", "runout-front-pt",
 ];
 
 /** Terrain relief tuned per basemap: soft grey shadows on the light map, deep shadows on dark/satellite. */
@@ -238,8 +243,23 @@ function mountOwnLayers(map: maplibregl.Map) {
   map.addSource("runout-front", { type: "geojson", data: EMPTY_FC });
   map.addSource("selected", { type: "geojson", data: EMPTY_FC });
 
+  // live CSDI sources (real HK government data, loaded on demand)
+  map.addSource("csdi-slopes", { type: "geojson", data: EMPTY_FC });
+  map.addSource("csdi-blackspots", { type: "geojson", data: EMPTY_FC });
+  map.addSource("csdi-landslides", { type: "geojson", data: EMPTY_FC });
+
   map.addLayer({ id: "flood-fill", type: "fill", source: "flood", layout: { visibility: "none" }, paint: { "fill-color": "#2470c2", "fill-opacity": 0.22 } });
   map.addLayer({ id: "flood-line", type: "line", source: "flood", layout: { visibility: "none" }, paint: { "line-color": "#3d8bfd", "line-opacity": 0.5, "line-dasharray": [2, 2] } });
+
+  // CEDD registered man-made slopes — real catalogue polygons, drawn under the synthetic risk layers
+  map.addLayer({
+    id: "csdi-slopes-fill", type: "fill", source: "csdi-slopes", layout: { visibility: "none" },
+    paint: { "fill-color": "#18b8a6", "fill-opacity": 0.16 },
+  });
+  map.addLayer({
+    id: "csdi-slopes-line", type: "line", source: "csdi-slopes", layout: { visibility: "none" },
+    paint: { "line-color": "#18b8a6", "line-opacity": 0.8, "line-width": ["interpolate", ["linear"], ["zoom"], 12, 0.6, 16, 1.6] },
+  });
 
   map.addLayer({
     id: "rain-heat", type: "heatmap", source: "rainfall-pts", layout: { visibility: "none" },
@@ -312,6 +332,24 @@ function mountOwnLayers(map: maplibregl.Map) {
       "circle-radius": ["*", ["get", "severity"], 4],
       "circle-color": "#ff3b2a", "circle-opacity": 0.35,
       "circle-stroke-width": 2, "circle-stroke-color": "#ff6b5b",
+    },
+  });
+
+  // CEDD landslide incident history — ~11k real points, small warm dots
+  map.addLayer({
+    id: "csdi-landslides-pt", type: "circle", source: "csdi-landslides", layout: { visibility: "none" },
+    paint: {
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 1.4, 13, 3, 16, 5],
+      "circle-color": "#ff9d42", "circle-opacity": 0.55,
+      "circle-stroke-width": ["interpolate", ["linear"], ["zoom"], 12, 0, 14, 0.8], "circle-stroke-color": "#b55b12",
+    },
+  });
+  // DSD flooding blackspots — few points, drawn prominent
+  map.addLayer({
+    id: "csdi-blackspots-pt", type: "circle", source: "csdi-blackspots", layout: { visibility: "none" },
+    paint: {
+      "circle-radius": 8, "circle-color": "#2470c2", "circle-opacity": 0.45,
+      "circle-stroke-width": 2.5, "circle-stroke-color": "#63b3ff",
     },
   });
 
@@ -467,6 +505,14 @@ export default function MapView() {
         });
       }
 
+      // live CSDI layers: popups, viewport-scoped slope loading, initial sync
+      wireCsdiPopups(map, () => {
+        popupRef.current ??= new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 10 });
+        return popupRef.current;
+      });
+      map.on("moveend", () => refreshCsdiSlopes(map));
+      syncCsdiData(map, useStore.getState().layers);
+
       loadedRef.current = true;
       applyVisibility(map, useStore.getState().layers);
       applyRiskFilter(map, useStore.getState().riskFilter);
@@ -519,11 +565,12 @@ export default function MapView() {
     (map.getSource("slopes-pts") as maplibregl.GeoJSONSource | undefined)?.setData(slopePointFC(fc, slopes));
   }, [slopes, assessments, stormMode, stormHorizonH]);
 
-  // ---- layer visibility ----
+  // ---- layer visibility (+ lazy-load live CSDI data for layers just toggled on) ----
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !loadedRef.current) return;
     applyVisibility(map, layers);
+    syncCsdiData(map, layers);
   }, [layers]);
 
   // ---- legend-driven risk class filter ----
@@ -660,6 +707,106 @@ function applyVisibility(map: maplibregl.Map, layers: ReturnType<typeof useStore
   safe("incidents-pt", layers.incidents);
   safe("flood-fill", layers.floodZones);
   safe("flood-line", layers.floodZones);
+  safe("csdi-slopes-fill", layers.csdiSlopes);
+  safe("csdi-slopes-line", layers.csdiSlopes);
+  safe("csdi-blackspots-pt", layers.csdiBlackspots);
+  safe("csdi-landslides-pt", layers.csdiLandslides);
+}
+
+// ---------- live CSDI data wiring (real HK government layers) ----------
+
+const CSDI_SLOPES_MIN_ZOOM = 12; // 61k polygons: only fetch the viewport once zoomed in
+
+// last successfully fetched slope envelope; skip refetch while the view stays inside it
+const csdiSlopesState = { bbox: null as null | [number, number, number, number], truncated: false, seq: 0 };
+
+function setSrcData(map: maplibregl.Map, id: string, fc: any) {
+  (map.getSource(id) as maplibregl.GeoJSONSource | undefined)?.setData(fc);
+}
+
+/** Fetch CEDD registered slopes for the current viewport (debounced by bbox containment). */
+function refreshCsdiSlopes(map: maplibregl.Map) {
+  if (!useStore.getState().layers.csdiSlopes) return;
+  if (map.getZoom() < CSDI_SLOPES_MIN_ZOOM) {
+    csdiSlopesState.bbox = null;
+    setSrcData(map, "csdi-slopes", EMPTY_FC);
+    return;
+  }
+  const b = map.getBounds();
+  const w = b.getWest(), s = b.getSouth(), e = b.getEast(), n = b.getNorth();
+  const prev = csdiSlopesState.bbox;
+  if (prev && !csdiSlopesState.truncated && w >= prev[0] && s >= prev[1] && e <= prev[2] && n <= prev[3]) return;
+  // fetch a margin beyond the viewport so small pans don't refetch
+  const mx = (e - w) * 0.25, my = (n - s) * 0.25;
+  const box: [number, number, number, number] = [w - mx, s - my, e + mx, n + my];
+  const seq = ++csdiSlopesState.seq;
+  fetchSlopesInBbox(...box)
+    .then(({ fc, truncated }) => {
+      if (seq !== csdiSlopesState.seq) return; // superseded by a later pan
+      csdiSlopesState.bbox = box;
+      csdiSlopesState.truncated = truncated;
+      setSrcData(map, "csdi-slopes", fc);
+    })
+    .catch((err) => console.warn("CSDI slopes fetch failed:", err));
+}
+
+/** Load whichever CSDI layers are toggled on (cached after first load). */
+function syncCsdiData(map: maplibregl.Map, layers: ReturnType<typeof useStore.getState>["layers"]) {
+  if (layers.csdiBlackspots) {
+    fetchBlackspots()
+      .then((fc) => setSrcData(map, "csdi-blackspots", fc))
+      .catch((err) => console.warn("CSDI blackspots fetch failed:", err));
+  }
+  if (layers.csdiLandslides) {
+    fetchLandslides()
+      .then((fc) => setSrcData(map, "csdi-landslides", fc))
+      .catch((err) => console.warn("CSDI landslides fetch failed:", err));
+  }
+  refreshCsdiSlopes(map);
+}
+
+/** Hover popups for the live layers — labelled as real data, unlike the synthetic overlays. */
+function wireCsdiPopups(map: maplibregl.Map, popupFor: () => maplibregl.Popup) {
+  const wire = (layerId: string, html: (p: any) => string) => {
+    map.on("mousemove", layerId, (e) => {
+      const f = e.features?.[0];
+      if (!f) return;
+      map.getCanvas().style.cursor = "pointer";
+      popupFor().setLngLat(e.lngLat).setHTML(html(f.properties)).addTo(map);
+    });
+    map.on("mouseleave", layerId, () => {
+      map.getCanvas().style.cursor = "";
+      popupFor().remove();
+    });
+  };
+  const foot = (src: string) => `<div style="color:#18a08f;font-size:9px;letter-spacing:0.6px;font-weight:700">LIVE DATA · ${src} via CSDI</div>`;
+  wire("csdi-slopes-fill", (p) => {
+    const ht = p.OVERALL_HT > 0 ? `${p.OVERALL_HT} m` : "—";
+    const an = p.OVERALL_AN > 0 ? ` · ${p.OVERALL_AN}°` : "";
+    return (
+      `<div style="font-family:var(--mono);font-weight:600">${p.SLOPE_NO}</div>` +
+      `<div style="font-size:10px">Registered man-made slope · ${ht}${an}</div>` +
+      `<div style="color:#6d7a8c;font-size:10px">${p.LOCATION ?? ""}</div>` +
+      `<div style="color:#6d7a8c;font-size:10px">Maintenance: ${p.MAINT_PART ?? "—"}</div>` +
+      foot("CEDD")
+    );
+  });
+  wire("csdi-blackspots-pt", (p) => (
+    `<div style="font-weight:600">Flooding blackspot · scale ${p.FLOODING_BLACKSPOT_SCALE ?? "—"}</div>` +
+    `<div style="font-size:10px">${p.LOCATION_EN ?? ""} · ${p.DISTRICT_EN ?? ""}</div>` +
+    `<div style="color:#6d7a8c;font-size:10px;max-width:260px;white-space:pre-line">${p.CAUSE_OF_FLOODING_EN ?? ""}</div>` +
+    foot("DSD")
+  ));
+  wire("csdi-landslides-pt", (p) => {
+    const d = p.FAILDATE ? new Date(p.FAILDATE).toISOString().slice(0, 10) : "date unknown";
+    const slopeRef = p.SLOPENUM && p.SLOPENUM !== "-" ? ` · slope ${p.SLOPENUM}` : "";
+    return (
+      `<div style="font-weight:600">Landslide incident · ${d}</div>` +
+      `<div style="font-size:10px">${p.FEATTYPE ?? ""}${slopeRef}</div>` +
+      `<div style="color:#6d7a8c;font-size:10px">${p.LOCATION ?? ""} · ref ${p.INCID}</div>` +
+      foot("CEDD")
+    );
+  });
 }
 
 function applyRiskFilter(map: maplibregl.Map, filter: ReturnType<typeof useStore.getState>["riskFilter"]) {

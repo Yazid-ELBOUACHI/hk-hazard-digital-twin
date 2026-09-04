@@ -40,7 +40,7 @@ export default function App() {
   return (
     <div className="app">
       <div className="synth-banner">
-        Synthetic data prototype — all slopes, sensors, risks &amp; simulations are generated. Not real Hong Kong government data.
+        Synthetic prototype — slopes, sensors, risks &amp; simulations are generated. Only the "Live HK data · CSDI" map layers (CEDD slopes &amp; landslides, DSD blackspots) are real government data.
       </div>
       <TopBar />
       {view === "emergency" && (

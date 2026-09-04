@@ -37,6 +37,10 @@ export interface LayerState {
   historicalLandslides: boolean;
   floodZones: boolean;
   sensors: boolean;
+  // live CSDI layers (real HK government data, not synthetic)
+  csdiSlopes: boolean;
+  csdiBlackspots: boolean;
+  csdiLandslides: boolean;
 }
 
 interface AppState {
@@ -134,6 +138,9 @@ export const useStore = create<AppState>((set, get) => ({
     historicalLandslides: false,
     floodZones: false,
     sensors: false,
+    csdiSlopes: false,
+    csdiBlackspots: false,
+    csdiLandslides: false,
   },
   stormMode: false,
   stormHorizonH: 8,

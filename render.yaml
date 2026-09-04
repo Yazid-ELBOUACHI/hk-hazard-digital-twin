@@ -1,0 +1,22 @@
+# Render Blueprint — password-protected web service hosting the built twin.
+#
+# APP_PASSWORD is deliberately NOT in this file: Render prompts for it when the
+# blueprint is applied (sync: false), so the password never lives in git.
+
+services:
+  - type: web
+    name: hk-hazard-digital-twin
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: node server/index.js
+    healthCheckPath: /login
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: APP_PASSWORD
+        sync: false # set when applying the blueprint, or in the Render dashboard
+      - key: SESSION_SECRET
+        generateValue: true # Render generates and stores a random key

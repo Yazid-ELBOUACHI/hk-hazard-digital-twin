@@ -109,7 +109,7 @@ setInterval(() => {
 // ---------- login page ----------
 
 const FEATURES = [
-  ["◈", "3D hazard twin", "~5,000 instrumented slopes over real Hong Kong terrain, coloured by live risk band."],
+  ["◈", "3D hazard twin", "~4,000 real registered slopes (CEDD Catalogue of Slopes) over Hong Kong terrain, coloured by risk band."],
   ["⚗", "Scenario simulation", "Test a storm or an intervention and watch the failure and runout play out."],
   ["◎", "Decision support", "Ranked attention lists, consequence cascades, portfolio optimisation, situation reports."],
 ];
@@ -270,8 +270,9 @@ function loginPage({ error = "", notice = "" } = {}) {
 
     <div class="synth-strip">
       <span class="warn">⚠</span>
-      <p><b>Synthetic data prototype.</b> Every slope, sensor, risk score and simulation is generated.
-      Nothing here is real Hong Kong government data, and no output is an official warning.</p>
+      <p><b>Research prototype.</b> Slope polygons and registration details are real open government
+      data (CEDD Catalogue of Slopes, DSD flooding blackspots, via CSDI). Every risk score, sensor
+      reading, incident and simulation is synthetic — no output is an official warning.</p>
     </div>
   </section>
 

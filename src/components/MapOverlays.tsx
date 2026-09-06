@@ -18,8 +18,8 @@ const LAYER_GROUPS: { title: string; items: { key: keyof LayerState; label: stri
   {
     title: "Exposure",
     items: [
-      { key: "roads", label: "Roads", hint: "Road and emergency-route segments" },
-      { key: "buildings", label: "Buildings", hint: "Buildings, hospitals (pink), schools (blue), rail" },
+      { key: "roads", label: "Roads", hint: "REAL DATA — LandsD road centrelines by class; loads per viewport from zoom 13" },
+      { key: "buildings", label: "Buildings & facilities", hint: "REAL DATA — HA hospitals, EDB schools & kindergartens, FSD fire stations, police stations, DH clinics, and LandsD building blocks within 150 m of each slope" },
       { key: "drainage", label: "Drainage", hint: "Drainage and utility assets" },
     ],
   },
@@ -33,11 +33,14 @@ const LAYER_GROUPS: { title: string; items: { key: keyof LayerState; label: stri
     ],
   },
   {
-    title: "Live HK data · CSDI",
+    title: "Live HK data · CSDI / HKO",
     items: [
       { key: "csdiSlopes", label: "Registered slopes", hint: "REAL DATA — CEDD Catalogue of Slopes (61,000+ registered man-made slopes). Zoom in to load the polygons around your view." },
+      { key: "csdiLpm", label: "LPM works", hint: "REAL DATA — CEDD LPMitP programme: 386 substandard government slopes and 113 hillside catchments under upgrading contracts, with contract and dates" },
       { key: "csdiLandslides", label: "Landslide history", hint: "REAL DATA — CEDD landslide incident records (~11,000 points with dates and locations)" },
+      { key: "csdiEntli", label: "Natural terrain landslides", hint: "REAL DATA — ENTLI: 113,000 natural terrain landslide crowns 1924–2023 as a density grid; zoom to 13+ for individual crowns and runout trails" },
       { key: "csdiBlackspots", label: "Flood blackspots", hint: "REAL DATA — DSD flooding blackspots currently on record, with causes and mitigation status" },
+      { key: "liveRain", label: "Rain gauges (live)", hint: "REAL DATA — HKO automatic weather stations: rainfall in the past hour, refreshed every 5 minutes" },
     ],
   },
 ];
@@ -71,6 +74,8 @@ export default function MapOverlays() {
   const sendViewCmd = useStore((s) => s.sendViewCmd);
   const basemap = useStore((s) => s.basemap);
   const setBasemap = useStore((s) => s.setBasemap);
+  const map3d = useStore((s) => s.map3d);
+  const setMap3d = useStore((s) => s.setMap3d);
 
   const [q, setQ] = useState("");
   const [layersOpen, setLayersOpen] = useState(false);
@@ -96,13 +101,16 @@ export default function MapOverlays() {
   const symbolRows: { label: string; color: string; shape: "dot" | "dot-lg" | "ring" | "line" | "area"; hint: string }[] = [];
   if (layers.buildings) {
     symbolRows.push(
-      { label: "Hospital", color: "#e56db1", shape: "dot-lg", hint: "Critical asset — hover a dot for its name" },
-      { label: "School", color: "#7db4ff", shape: "dot", hint: "Critical asset" },
-      { label: "Rail segment", color: "#9a86e8", shape: "dot", hint: "Rail asset" },
-      { label: "Building", color: "#8fa2ba", shape: "dot", hint: "Residential block" }
+      { label: "Hospital (HA)", color: "#e56db1", shape: "dot-lg", hint: "Hospital Authority hospital — hover for its name" },
+      { label: "Fire station (FSD)", color: "#ff6b3d", shape: "dot", hint: "Fire Services Department station" },
+      { label: "Police station", color: "#b9a9f5", shape: "dot", hint: "Police district / division station" },
+      { label: "School (EDB)", color: "#7db4ff", shape: "dot", hint: "Government, aided, DSS, private, international, ESF and special schools" },
+      { label: "Kindergarten (EDB)", color: "#9ec5ff", shape: "dot", hint: "Registered kindergarten" },
+      { label: "Clinic (DH)", color: "#66d4cf", shape: "dot", hint: "Department of Health clinic / health centre" },
+      { label: "Building block (LandsD)", color: "#8fa2ba", shape: "dot", hint: "LandsD building block within 150 m of a registered slope, with height" }
     );
   }
-  if (layers.roads) symbolRows.push({ label: "Road / emergency route", color: "#5b7ea8", shape: "line", hint: "Road network segments" });
+  if (layers.roads) symbolRows.push({ label: "Road centreline (LandsD) · zoom 13+", color: "#5b7ea8", shape: "line", hint: "Expressway / trunk / primary roads drawn wider and warmer" });
   if (layers.incidents) symbolRows.push({ label: "Active incident (size = severity)", color: "#ff6b5b", shape: "ring", hint: "Ongoing landslide, rockfall or flooding" });
   if (layers.sensors) symbolRows.push({ label: "Instrumented slope", color: "#ffd76b", shape: "dot", hint: "Slope with sensors" });
   if (layers.mitigations) symbolRows.push({ label: "Mitigated slope", color: "#43d19a", shape: "dot", hint: "Registered stabilisation works" });
@@ -112,12 +120,12 @@ export default function MapOverlays() {
   if (layers.csdiSlopes) symbolRows.push({ label: "Registered slope (CEDD, live)", color: "#18b8a6", shape: "area", hint: "Real Catalogue of Slopes polygon — zoom in to load" });
   if (layers.csdiLandslides) symbolRows.push({ label: "Past landslide (CEDD, live)", color: "#ff9d42", shape: "dot", hint: "Real landslide incident record" });
   if (layers.csdiBlackspots) symbolRows.push({ label: "Flood blackspot (DSD, live)", color: "#63b3ff", shape: "ring", hint: "Real DSD flooding blackspot" });
-
-  // refresh projection colors while storm mode is on
-  useEffect(() => {
-    if (!stormMode) return;
-    void useStore.getState().refreshDerived(true);
-  }, [stormMode, stormHorizonH]);
+  if (layers.csdiLpm) symbolRows.push({ label: "LPM works: slope / catchment (CEDD, live)", color: "#e8862e", shape: "area", hint: "Real LPMitP upgrading works — amber slopes, gold hillside catchments" });
+  if (layers.csdiEntli) {
+    symbolRows.push({ label: "Landslide density, 250 m cells (ENTLI)", color: "#df5a2b", shape: "area", hint: "Natural terrain landslide crowns per cell — darker is denser; zoom to 13+ for individual crowns and trails" });
+    symbolRows.push({ label: "Crown / trail: recent · relict", color: "#b08968", shape: "dot", hint: "Rust = dated recent landslide, tan = relict (pre-1963 baseline)" });
+  }
+  if (layers.liveRain) symbolRows.push({ label: "Rain gauge, past hour (HKO, live)", color: "#3d8bfd", shape: "dot-lg", hint: "Circle grows with the past-hour rainfall — hover for the reading" });
 
   // "/" focuses search (when not typing elsewhere)
   useEffect(() => {
@@ -144,6 +152,7 @@ export default function MapOverlays() {
         <div className="map-search">
           <input
             ref={searchRef}
+            aria-label="Search slopes by ID, name or district"
             placeholder="Search slope ID or district…  ( / )"
             value={q}
             onChange={(e) => setQ(e.target.value)}
@@ -191,7 +200,10 @@ export default function MapOverlays() {
             <div
               className={`legend-row clickable ${riskFilter[c] ? "" : "off"}`}
               key={c}
-              onClick={() => toggleRiskCategory(c)}
+              onClick={() => {
+                if (!filtered && counts[c] === 0) return; // isolating an empty class would blank the map
+                toggleRiskCategory(c);
+              }}
               title={filtered ? (riskFilter[c] ? "Hide this class" : "Show this class") : "Show only this class"}
             >
               <div className="legend-swatch" style={{ background: RISK_COLORS[c] }} />
@@ -243,6 +255,10 @@ export default function MapOverlays() {
         <button onClick={() => sendViewCmd("tilt", -15)} title="Tilt less (flatter view)">⤓</button>
         <span className="sep" />
         <button onClick={() => sendViewCmd("home")} title="Reset view to all of Hong Kong">⌂</button>
+        <span className="sep" />
+        <button className={`mode ${map3d ? "on" : ""}`} onClick={() => setMap3d(!map3d)} title={map3d ? "3D view: terrain and buildings. Click for a flat 2D map." : "2D view. Click for 3D terrain and buildings."}>
+          {map3d ? "3D" : "2D"}
+        </button>
         <span className="sep" />
         <button
           className={basemap === "satellite" ? "on" : ""}

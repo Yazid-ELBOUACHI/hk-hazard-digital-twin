@@ -2,21 +2,24 @@
   "name": "hk-hazard-digital-twin",
   "private": true,
   "version": "0.1.0",
-  "description": "Hong Kong Landslide & Flood Digital Twin — simulation-enabled decision support prototype (SYNTHETIC DATA)",
+  "description": "Hong Kong Landslide & Flood Digital Twin — simulation-enabled decision support prototype (real HK open data + synthetic hazard state)",
   "type": "module",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
+    "test": "node scripts/test.mjs",
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "start": "node server/index.js",
     "terrain": "node scripts/build-terrain.mjs",
-    "serve": "npm run build && node server/index.js"
+    "serve": "npm run build && node server/index.js",
+    "bake:live": "node scripts/build-live-data.mjs"
   },
   "dependencies": {
+    "compression": "^1.8.1",
     "express": "^4.22.2",
     "maplibre-gl": "^4.7.1",
     "react": "^18.3.1",
@@ -28,6 +31,7 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
+    "esbuild": "^0.25.12",
     "pngjs": "^7.0.0",
     "typescript": "^5.7.2",
     "vite": "^6.0.7"

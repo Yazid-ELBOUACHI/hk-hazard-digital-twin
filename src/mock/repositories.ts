@@ -20,15 +20,20 @@ import type {
   ValidationRecord,
   WeatherState,
 } from "@/core/types";
+import type { LiveRain } from "@/live/hko";
 import { getDataset } from "./generate";
 import {
   forecastSeries,
+  getLiveRain,
   getStormOverlay,
+  liveRain24Known,
   rain24At,
+  rainIsLive,
   rainRateAt,
   regionalRainFactor,
   sensorValueAt,
   SENSOR_UNITS,
+  setLiveRain,
   setStormOverlay,
   stormEtaHours,
 } from "./signals";
@@ -90,26 +95,55 @@ export class MockSensorDataProvider implements SensorDataProvider {
   }
 }
 
+/**
+ * Weather provider. Rainfall baseline is REAL HKO data when a live observation has been injected
+ * via setLive() (provenance isSynthetic=false), synthetic otherwise; forecast and the Storm Watch
+ * overlay are always synthetic.
+ */
 export class MockWeatherDataProvider implements WeatherDataProvider {
   async getState(gameTime: number): Promise<WeatherState> {
     const stormSince = getStormOverlay();
     const eta = stormEtaHours(gameTime);
-    const mk = (value: number, unit: string, source: string) => ({
+    const live = getLiveRain();
+    const isLive = rainIsLive();
+    const has24 = isLive && liveRain24Known();
+    const stormNote = stormSince !== null ? " + synthetic Storm Watch overlay" : "";
+    const mk = (value: number, unit: string, source: string, real: boolean, quality: number) => ({
       value,
       unit,
       source,
-      timestamp: new Date(gameTime).toISOString(),
-      quality: 0.95,
-      isSynthetic: true as const,
+      timestamp: real && live ? live.obsTime : new Date(gameTime).toISOString(),
+      quality,
+      isSynthetic: !real,
     });
+    let summary: WeatherState["live"];
+    if (live) {
+      const rates = live.stations.map((s) => s.mmHr);
+      summary = {
+        obsTime: live.obsTime,
+        fetchedAt: live.fetchedAt,
+        stations: live.stations.length,
+        maxMmHr: Math.max(0, ...rates),
+        meanMmHr: +(rates.reduce((a, b) => a + b, 0) / Math.max(1, rates.length)).toFixed(1),
+        hours24: live.hours24,
+        source: live.source,
+      };
+    }
     return {
-      rainfallLast24hMm: mk(+rain24At(gameTime).toFixed(0), "mm", "mock_rain_network"),
-      rainfallRateMmHr: mk(+rainRateAt(gameTime).toFixed(1), "mm/hr", "mock_rain_network"),
+      rainfallLast24hMm: mk(
+        +rain24At(gameTime).toFixed(0),
+        "mm",
+        has24 ? `HKO hourly rainfall, ${live!.hours24}/24 h accumulated${stormNote}` : `mock_rain_network${stormNote}`,
+        has24,
+        has24 ? Math.min(1, live!.hours24 / 24) : 0.95
+      ),
+      rainfallRateMmHr: mk(+rainRateAt(gameTime).toFixed(1), "mm/hr", isLive ? `HKO hourly rainfall (live)${stormNote}` : `mock_rain_network${stormNote}`, isLive, isLive ? 0.98 : 0.95),
       forecast72h: forecastSeries(gameTime, 72),
       stormActive: stormSince !== null,
       stormName: stormSince !== null ? "Synthetic Severe Rainstorm 'DEMO-01'" : undefined,
       stormEtaHours: eta !== null ? Math.max(0, +eta.toFixed(1)) : undefined,
       temperatureC: 27,
+      live: summary,
     };
   }
   regionalFactor(lon: number, lat: number): number {
@@ -117,6 +151,10 @@ export class MockWeatherDataProvider implements WeatherDataProvider {
   }
   setStorm(activeSince: number | null) {
     setStormOverlay(activeSince);
+  }
+  /** Inject the latest HKO observation (REAL) as the rainfall baseline; null reverts to synthetic. */
+  setLive(r: LiveRain | null) {
+    setLiveRain(r);
   }
 }
 

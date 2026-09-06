@@ -17,7 +17,16 @@ export function fmtInt(n: number): string {
   return n.toLocaleString("en-US");
 }
 
+const hkDateTime = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Asia/Hong_Kong", year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+});
+
 export function fmtClock(t: number): string {
-  const d = new Date(t);
-  return d.toISOString().slice(11, 16) + " UTC · " + d.toISOString().slice(0, 10);
+  const p = Object.fromEntries(hkDateTime.formatToParts(t).map(({ type, value }) => [type, value]));
+  return `${p.hour}:${p.minute} HKT · ${p.year}-${p.month}-${p.day}`;
+}
+
+export function fmtDate(t: number): string {
+  return fmtClock(t).split(" · ")[1];
 }

@@ -286,3 +286,41 @@ input[type="range"] { accent-color: var(--accent); }
 .cq-kv { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; }
 .cq-arrow-h { font-size: 10.5px; color: var(--text-2); margin-top: 4px; padding: 6px 8px; border: 1px dashed var(--line); border-radius: 6px; }
 .cq-arrow-h b { color: var(--text-0); }
+
+/* ---------- real-data provenance ---------- */
+.badge.real, .badge.live { background: rgba(24,184,166,0.14); color: #18b8a6; }
+.flag.real { background: rgba(24,184,166,0.16); color: #3fd1c0; }
+.live-dot { color: #18b8a6; font-size: 9px; margin-left: 5px; vertical-align: middle; animation: live-pulse 2s infinite; }
+@keyframes live-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.synth-banner .banner-link { margin-left: 10px; background: none; border: 1px solid rgba(255,215,107,0.35); color: #ffd76b; border-radius: 4px; padding: 1px 8px; font: inherit; font-weight: 600; cursor: pointer; }
+.synth-banner .banner-link:hover { background: rgba(255,215,107,0.12); }
+.tl-item.real .tl-label { color: var(--text-0); }
+.tl-item.real .tl-date::after { content: "REAL"; margin-left: 6px; font-size: 8.5px; font-weight: 700; letter-spacing: 0.6px; color: #18b8a6; }
+
+/* ---------- data sources panel ---------- */
+.ds-legend { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 11px; color: var(--text-2); margin: 6px 0 14px; }
+.ds-legend .chip { pointer-events: none; }
+.ds-group { margin-bottom: 18px; }
+.ds-group h3 { margin-bottom: 8px; }
+table.data.ds { table-layout: fixed; min-width: 1080px; width: 100%; }
+table.data.ds th:nth-child(1) { width: 17%; } table.data.ds th:nth-child(2) { width: 33%; } table.data.ds th:nth-child(3) { width: 9%; }
+table.data.ds th:nth-child(4) { width: 7%; } table.data.ds th:nth-child(5) { width: 10%; } table.data.ds th:nth-child(6) { width: 12%; } table.data.ds th:nth-child(7) { width: 12%; }
+table.data.ds td { vertical-align: top; line-height: 1.45; overflow-wrap: anywhere; }
+table.data.ds td.name { min-width: 0; }
+table.data.ds td.name b { display: block; font-size: 12px; }
+table.data.ds td.name .prov { color: var(--text-2); font-size: 10.5px; }
+table.data.ds td.name .ref { font-family: var(--mono); color: var(--text-2); font-size: 9.5px; word-break: break-all; }
+table.data.ds td.what { font-size: 11.5px; }
+table.data.ds td.what .use { color: var(--text-2); margin-top: 3px; }
+table.data.ds td.what .use::before { content: "Used for: "; color: var(--text-1); font-weight: 600; }
+table.data.ds td.small { font-size: 11px; color: var(--text-1); }
+.conn { display: inline-block; font-size: 9.5px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; padding: 2px 6px; border-radius: 3px; white-space: nowrap; }
+.conn.live-api { background: rgba(24,184,166,0.14); color: #18b8a6; }
+.conn.live-proxy { background: rgba(61,139,253,0.16); color: #7db4ff; }
+.conn.baked { background: rgba(232,195,58,0.14); color: #ffd76b; }
+.conn.tiles { background: rgba(154,134,232,0.16); color: #b9a9f5; }
+.conn.synthetic { background: rgba(124,135,148,0.18); color: #aab6c5; }
+.ds-status { font-size: 10.5px; }
+.ds-status .ok { color: var(--risk-low); }
+.ds-status .err { color: #ff8577; }
+.ds-status .muted { color: var(--text-2); }

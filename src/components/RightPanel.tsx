@@ -4,7 +4,7 @@
 
 import { useMemo, useState } from "react";
 import { useStore } from "@/state/store";
-import { fmtInt, isStale, timeAgo } from "@/core/format";
+import { fmtClock, fmtInt, isStale, timeAgo } from "@/core/format";
 import { RISK_COLORS } from "@/core/types";
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip } from "recharts";
 import Collapsible from "./ui/Collapsible";
@@ -148,11 +148,26 @@ export default function RightPanel() {
 
       {weather && (
         <div className="panel">
-          <h3>Weather (synthetic)</h3>
+          <h3>
+            Weather
+            {weather.live ? (
+              <span className="hint badge real" title={`${weather.live.stations} HKO stations · observation ${weather.live.obsTime.slice(11, 16)} HKT · fetched ${fmtClock(Date.parse(weather.live.fetchedAt))}`}>
+                live · HKO
+              </span>
+            ) : (
+              <span className="hint badge synth">synthetic</span>
+            )}
+          </h3>
           <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 6 }}>
             <span className="stat-big" style={{ fontSize: 20 }}>{weather.rainfallLast24hMm.value} mm</span>
             <span style={{ color: "var(--text-2)", fontSize: 11 }}>last 24 h · {weather.rainfallRateMmHr.value} mm/hr now</span>
           </div>
+          {weather.live && (
+            <div className="section-note" style={{ marginBottom: 6 }}>
+              {weather.live.stations} stations · max {weather.live.maxMmHr} mm/h · mean {weather.live.meanMmHr} mm/h · obs {weather.live.obsTime.slice(11, 16)} HKT ·{" "}
+              {weather.rainfallLast24hMm.isSynthetic ? "24-h total pending" : `24-h window ${weather.live.hours24}/24 h`}
+            </div>
+          )}
           {weather.stormActive && (
             <div className="badge critical" style={{ marginBottom: 8 }}>
               {weather.stormName} — heavy band in ~{weather.stormEtaHours} h

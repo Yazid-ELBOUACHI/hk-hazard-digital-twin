@@ -15,6 +15,8 @@ import crypto from "node:crypto";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
+import compression from "compression";
+import { liveRainHandler } from "./liveRain.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(__dirname, "..", "dist");
@@ -109,7 +111,7 @@ setInterval(() => {
 // ---------- login page ----------
 
 const FEATURES = [
-  ["◈", "3D hazard twin", "~4,000 real registered slopes (CEDD Catalogue of Slopes) over Hong Kong terrain, coloured by risk band."],
+  ["◈", "3D hazard twin", "~4,300 real registered slopes (CEDD Catalogue of Slopes) over Hong Kong terrain, coloured by risk band, with live HKO rainfall."],
   ["⚗", "Scenario simulation", "Test a storm or an intervention and watch the failure and runout play out."],
   ["◎", "Decision support", "Ranked attention lists, consequence cascades, portfolio optimisation, situation reports."],
 ];
@@ -270,9 +272,10 @@ function loginPage({ error = "", notice = "" } = {}) {
 
     <div class="synth-strip">
       <span class="warn">⚠</span>
-      <p><b>Research prototype.</b> Slope polygons and registration details are real open government
-      data (CEDD Catalogue of Slopes, DSD flooding blackspots, via CSDI). Every risk score, sensor
-      reading, incident and simulation is synthetic — no output is an official warning.</p>
+      <p><b>Research prototype.</b> Real open government data: CEDD slope inventory and LPM works
+      programme, landslide records, natural-terrain landslide inventory, GEO raingauge record, HKO live
+      rainfall, 2021 census (via CSDI / HKO). Every risk score, sensor reading, simulation and active
+      incident is synthetic — no output is an official warning.</p>
     </div>
   </section>
 
@@ -339,6 +342,7 @@ function loginPage({ error = "", notice = "" } = {}) {
 const app = express();
 app.set("trust proxy", 1); // Render terminates TLS upstream
 app.disable("x-powered-by");
+app.use(compression()); // gzip: the baked data chunks shrink ~4× on the wire
 app.use(express.urlencoded({ extended: false, limit: "8kb" }));
 
 app.use((_req, res, next) => {
@@ -392,6 +396,9 @@ app.use((req, res, next) => {
   if (wantsHtml) return res.redirect("/login");
   res.status(401).type("txt").send("Authentication required");
 });
+
+// Live HKO rainfall (proxy + rolling 24-h accumulation) — real data, session-gated like the app.
+app.get("/api/live/rainfall", (req, res) => void liveRainHandler(req, res));
 
 app.use(
   express.static(DIST, {

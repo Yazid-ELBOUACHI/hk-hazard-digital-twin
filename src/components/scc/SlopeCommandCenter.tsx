@@ -22,6 +22,7 @@ export default function SlopeCommandCenter() {
   const assessments = useStore((s) => s.assessments);
   const gameTime = useStore((s) => s.gameTime);
   const selectSlope = useStore((s) => s.selectSlope);
+  const flyToSlope = useStore((s) => s.flyToSlope);
 
   // a newly selected slope always starts on Overview
   useEffect(() => {
@@ -48,6 +49,7 @@ export default function SlopeCommandCenter() {
         <h2>{slope.id}</h2>
         <span className={`badge ${assessment.category}`}>{assessment.category.replace("-", " ")}</span>
         <span className="badge synth">Synthetic</span>
+        <button className="btn sm" onClick={() => flyToSlope(slope.id)} title="Fit this slope into the visible map">Locate slope</button>
         <div className="meta">
           {slope.district}, {slope.region} · {slope.slopeType} · {slope.slopeAngleDeg}° · {slope.heightM} m high · sensors updated {timeAgo(slope.freshness.sensor, gameTime)}
         </div>

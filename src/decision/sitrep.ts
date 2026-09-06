@@ -31,6 +31,11 @@ export function generateSitrep(
   lines.push(`1. CURRENT CONDITIONS`);
   lines.push(`   Territory-mean rainfall (24 h): ${kpi.rainfall24hMm} mm; current intensity ${weather.rainfallRateMmHr.value} mm/hr.`);
   lines.push(
+    weather.live
+      ? `   Rainfall source: HKO hourly rainfall, ${weather.live.stations} stations, observation ${weather.live.obsTime.slice(0, 16).replace("T", " ")} HKT (REAL); 24-h window ${weather.live.hours24}/24 h.`
+      : `   Rainfall source: synthetic baseline (HKO live feed unavailable).`
+  );
+  lines.push(
     weather.stormActive
       ? `   ${weather.stormName} — heavy rain band arriving in ~${weather.stormEtaHours} h.`
       : `   No storm event active. Unsettled showers across the territory.`

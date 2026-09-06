@@ -3,6 +3,9 @@
 import { create } from "zustand";
 import { registry } from "@/core/registry";
 import { GAME_EPOCH, prepareRealSlopes } from "@/mock/generate";
+import { fetchLiveRain, startLiveRainPolling, type LiveRain } from "@/live/hko";
+import { getSourceStatus, subscribeSources, type SourceStatus } from "@/core/dataSources";
+import { timed } from "@/core/schedule";
 import { DEFAULT_PARAMS } from "@/mock/MockSimulationProvider";
 import type {
   Asset,
@@ -20,6 +23,7 @@ import type {
 } from "@/core/types";
 
 export type ViewId = "overview" | "emergency" | "planning" | "reports" | "ask";
+export type ReportsTabId = "sitrep" | "validation" | "rainfall" | "sources";
 export type BasemapId = "light" | "dark" | "satellite";
 
 const ALL_RISK_VISIBLE: Record<RiskCategory, boolean> = { low: true, moderate: true, elevated: true, high: true, critical: true, "no-data": true };
@@ -37,10 +41,13 @@ export interface LayerState {
   historicalLandslides: boolean;
   floodZones: boolean;
   sensors: boolean;
-  // live CSDI layers (real HK government data, not synthetic)
+  // live CSDI / HKO layers (real HK government data, not synthetic)
   csdiSlopes: boolean;
   csdiBlackspots: boolean;
   csdiLandslides: boolean;
+  csdiLpm: boolean; // LPMitP works programme polygons
+  csdiEntli: boolean; // ENTLI natural terrain landslides (density grid far out, crowns + trails close in)
+  liveRain: boolean; // HKO rain-gauge stations with the latest past-hour reading
 }
 
 interface AppState {
@@ -57,9 +64,12 @@ interface AppState {
   assessments: Map<string, RiskAssessment>;
   kpi: KpiSnapshot | null;
   weather: WeatherState | null;
+  liveRain: LiveRain | null; // latest HKO observation (real), null when unavailable
+  sourceStatus: Record<string, SourceStatus>; // runtime status per data source id
 
   // ui
   view: ViewId;
+  reportsTab: ReportsTabId; // which Reports pane opens (deep-linked from the banner's "Data sources")
   role: Role;
   selectedSlopeId: string | null;
   commandCenterOpen: boolean;
@@ -72,6 +82,7 @@ interface AppState {
   riskFilter: Record<RiskCategory, boolean>; // legend-driven visibility of slope risk classes
   viewCmd: { type: "rotate" | "tilt" | "north" | "home" | "zoom"; delta?: number; token: number } | null; // camera commands for the map
   basemap: BasemapId; // light/dark vector (OpenFreeMap) or satellite imagery (Esri)
+  map3d: boolean;
 
   // scenario / simulation
   scenarioParams: ScenarioParams;
@@ -91,6 +102,7 @@ interface AppState {
   selectSlope(id: string | null): void;
   openCommandCenter(open: boolean): void;
   setView(v: ViewId): void;
+  setReportsTab(t: ReportsTabId): void;
   setRole(r: Role): void;
   toggleLayer(k: keyof LayerState): void;
   setStormMode(on: boolean): void;
@@ -107,11 +119,19 @@ interface AppState {
   resetRiskFilter(): void;
   sendViewCmd(type: "rotate" | "tilt" | "north" | "home" | "zoom", delta?: number): void;
   setBasemap(b: BasemapId): void;
+  setMap3d(enabled: boolean): void;
 }
+
+// one risk pass at a time; a forced pass (storm toggle, live rain) supersedes an in-flight one
+let refreshSeq = 0;
+let refreshing = false;
+let initialization: Promise<void> | null = null;
+let scenarioSeq = 0;
+let cameraSeq = 0;
 
 export const useStore = create<AppState>((set, get) => ({
   gameTime: GAME_EPOCH,
-  speed: 60, // 1 real second = 1 game minute
+  speed: 1, // real-time by default; accelerated playback is explicitly selected
   lastAssessTime: 0,
 
   ready: false,
@@ -121,8 +141,11 @@ export const useStore = create<AppState>((set, get) => ({
   assessments: new Map(),
   kpi: null,
   weather: null,
+  liveRain: null,
+  sourceStatus: {},
 
   view: "overview",
+  reportsTab: "sitrep",
   role: "engineer",
   selectedSlopeId: null,
   commandCenterOpen: false,
@@ -141,6 +164,9 @@ export const useStore = create<AppState>((set, get) => ({
     csdiSlopes: false,
     csdiBlackspots: false,
     csdiLandslides: false,
+    csdiLpm: false,
+    csdiEntli: false,
+    liveRain: false,
   },
   stormMode: false,
   stormHorizonH: 8,
@@ -150,6 +176,7 @@ export const useStore = create<AppState>((set, get) => ({
   riskFilter: { ...ALL_RISK_VISIBLE },
   viewCmd: null,
   basemap: "light",
+  map3d: true, // 3D terrain + buildings by default; the HUD toggle flattens the map for a 2D read
 
   scenarioParams: { ...DEFAULT_PARAMS },
   simMode: "fast",
@@ -161,15 +188,33 @@ export const useStore = create<AppState>((set, get) => ({
   animSpeed: 1,
 
   async init() {
-    // real CEDD slope inventory must be in place before the registry builds the dataset
-    await prepareRealSlopes();
+    if (initialization) return initialization;
+    initialization = (async () => {
+    // runtime status of every data source, for the Data Sources panel
+    subscribeSources(() => set({ sourceStatus: getSourceStatus() }));
+    // The real CEDD slope inventory (+ baked real context) must be in place before the registry builds
+    // the dataset; the first HKO observation is fetched alongside so the first risk pass is already live.
+    const [, live] = await Promise.all([prepareRealSlopes(), fetchLiveRain().catch(() => null)]);
+    if (live) registry.weather.setLive(live);
     const [slopes, assets, incidents] = await Promise.all([
       registry.slopes.getAll(),
       registry.assets.getAll(),
       registry.incidents.getActive(get().gameTime),
     ]);
-    set({ slopes, assets, incidents, ready: true });
+    set({ slopes, assets, incidents, liveRain: live, ready: true });
     await get().refreshDerived(true);
+    // keep the rainfall baseline live: HKO publishes hourly, we re-check every 5 real minutes
+    startLiveRainPolling(
+      (r) => {
+        registry.weather.setLive(r);
+        set({ liveRain: r });
+        void get().refreshDerived(true);
+      },
+      5 * 60_000,
+      false
+    );
+    })();
+    return initialization;
   },
 
   tick(realDtSec: number) {
@@ -186,17 +231,29 @@ export const useStore = create<AppState>((set, get) => ({
   async refreshDerived(force = false) {
     const { gameTime, lastAssessTime, slopes } = get();
     if (!slopes.length) return;
-    // recompute at most every 10 game-minutes
+    // recompute at most every 10 game-minutes, never two passes at once
     if (!force && gameTime - lastAssessTime < 10 * 60_000) return;
-    const assessments = registry.risk.assessAll(slopes, gameTime);
-    const [kpi, weather] = await Promise.all([
-      registry.risk.kpis(slopes, assessments, gameTime),
-      registry.weather.getState(gameTime),
-    ]);
-    set({ assessments, kpi, weather, lastAssessTime: gameTime });
+    if (!force && refreshing) return;
+    const seq = ++refreshSeq;
+    refreshing = true;
+    try {
+      // chunked: yields to the browser between slices so the map stays interactive
+      const assessments = await timed("risk pass (chunked)", () => registry.risk.assessAllAsync(slopes, gameTime), 400);
+      if (seq !== refreshSeq) return; // superseded by a newer pass
+      const [kpi, weather] = await timed("kpis + weather", () =>
+        Promise.all([registry.risk.kpis(slopes, assessments, gameTime), registry.weather.getState(gameTime)])
+      );
+      if (seq !== refreshSeq) return;
+      await timed("store update + render", () => set({ assessments, kpi, weather, lastAssessTime: gameTime }));
+    } finally {
+      if (seq === refreshSeq) refreshing = false;
+    }
   },
 
   selectSlope(id) {
+    const slope = id ? get().slopes.find((s) => s.id === id) : undefined;
+    if (id && !slope) return;
+    scenarioSeq++;
     set({
       selectedSlopeId: id,
       commandCenterOpen: id !== null,
@@ -206,6 +263,10 @@ export const useStore = create<AppState>((set, get) => ({
       animPlaying: false,
       animTimeSec: 0,
       scenarioParams: { ...DEFAULT_PARAMS },
+      ...(slope ? {
+        view: get().view === "emergency" ? "emergency" as const : "overview" as const,
+        flyTo: { center: slope.centroid, zoom: 17, token: ++cameraSeq },
+      } : {}),
     });
   },
 
@@ -215,6 +276,10 @@ export const useStore = create<AppState>((set, get) => ({
 
   setView(v) {
     set({ view: v });
+  },
+
+  setReportsTab(t) {
+    set({ reportsTab: t });
   },
 
   setRole(r) {
@@ -249,15 +314,19 @@ export const useStore = create<AppState>((set, get) => ({
   async runScenario(extraInterventions, forComparison = false) {
     const { selectedSlopeId, scenarioParams, simMode } = get();
     if (!selectedSlopeId) return;
+    const seq = ++scenarioSeq;
+    const current = () => seq === scenarioSeq && get().selectedSlopeId === selectedSlopeId;
     const params: ScenarioParams = {
       ...scenarioParams,
       interventions: extraInterventions ?? scenarioParams.interventions,
     };
     const job = await registry.simulation.submit(selectedSlopeId, params, simMode);
+    if (!current()) return;
     set({ activeJob: job });
     const poll = async () => {
+      if (!current()) return;
       const j = await registry.simulation.getJob(job.id);
-      if (!j) return;
+      if (!j || !current()) return;
       set({ activeJob: j });
       if (j.status === "done" && j.result) {
         if (forComparison) {
@@ -287,7 +356,7 @@ export const useStore = create<AppState>((set, get) => ({
   flyToSlope(id) {
     const s = get().slopes.find((x) => x.id === id);
     if (!s) return;
-    set({ flyTo: { center: s.centroid, zoom: 14.5, token: Date.now() } });
+    set({ flyTo: { center: s.centroid, zoom: 17, token: ++cameraSeq } });
   },
 
   setMapLoaded(v) {
@@ -323,5 +392,8 @@ export const useStore = create<AppState>((set, get) => ({
 
   setBasemap(b) {
     set({ basemap: b });
+  },
+  setMap3d(map3d) {
+    set({ map3d });
   },
 }));

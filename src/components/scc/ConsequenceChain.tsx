@@ -14,6 +14,10 @@ const KIND_META: Record<AssetKind, { icon: string; label: string; color: string 
   building: { icon: "🏢", label: "Residential", color: "#8fa2ba" },
   hospital: { icon: "🏥", label: "Hospital", color: "#e56db1" },
   school: { icon: "🏫", label: "School", color: "#7db4ff" },
+  kindergarten: { icon: "🎒", label: "Kindergarten", color: "#9ec5ff" },
+  clinic: { icon: "🩺", label: "Clinic", color: "#66d4cf" },
+  "fire-station": { icon: "🚒", label: "Fire station", color: "#ff6b3d" },
+  police: { icon: "🚓", label: "Police station", color: "#b9a9f5" },
   railway: { icon: "🚆", label: "Rail", color: "#9a86e8" },
   drainage: { icon: "🚰", label: "Drainage", color: "#38b6d8" },
   utility: { icon: "⚡", label: "Utility", color: "#e8c33a" },
@@ -58,8 +62,9 @@ export default function ConsequenceChain({ slope, assessment, assets }: { slope:
   const utils = has("utility");
   const rail = has("railway");
   const hospitals = has("hospital");
-  const schools = has("school");
+  const schools = has("school", "kindergarten");
   const homes = has("building");
+  const responders = has("fire-station", "police");
 
   if (roads.length) {
     const emergency = roads.some((r) => r.asset.kind === "emergency-route");
@@ -83,7 +88,8 @@ export default function ConsequenceChain({ slope, assessment, assets }: { slope:
   }
   if (utils.length) effects.push({ icon: "⚡", title: "Utility outage", detail: `${utils.length} substation${utils.length > 1 ? "s" : ""} exposed`, severity: "med" });
   if (rail.length) effects.push({ icon: "🚆", title: "Rail service disruption", detail: `${rail.length} segment${rail.length > 1 ? "s" : ""} in the corridor`, severity: "high" });
-  if (schools.length) effects.push({ icon: "🏫", title: "School evacuation trigger", detail: `${schools.length} school${schools.length > 1 ? "s" : ""} nearby`, severity: "med" });
+  if (schools.length) effects.push({ icon: "🏫", title: "School evacuation trigger", detail: `${schools.length} school${schools.length > 1 ? "s" : ""} / kindergarten${schools.length > 1 ? "s" : ""} within 500 m`, severity: "med" });
+  if (responders.length) effects.push({ icon: "🚒", title: "Responder base in the corridor", detail: `${responders.map((r) => r.asset.name).join(", ")} — access to be kept clear`, severity: "med" });
   if (homes.length) effects.push({ icon: "🏢", title: "Buildings exposed", detail: sim ? `${sim.buildingsExposed} buildings in simulated footprint` : `${homes.length} residential blocks nearby`, severity: homes.length > 2 ? "high" : "med" });
   if (effects.length === 0) effects.push({ icon: "✓", title: "No registered assets in the corridor", detail: "consequences limited to the slope and its immediate surroundings", severity: "low" });
 
@@ -134,7 +140,7 @@ export default function ConsequenceChain({ slope, assessment, assets }: { slope:
         {/* Stage 2: direct impacts */}
         <div className="cq-col">
           <div className="cq-stage">2 · Direct impacts</div>
-          {impacts.length === 0 && <div className="cq-card muted">No registered assets linked to this slope.</div>}
+          {impacts.length === 0 && <div className="cq-card muted">No building, road or facility within reach of this slope in the LandsD / facility records.</div>}
           {impacts.slice(0, 5).map(({ asset, distM, inReach }) => {
             const m = KIND_META[asset.kind];
             return (
@@ -145,7 +151,7 @@ export default function ConsequenceChain({ slope, assessment, assets }: { slope:
                   <span className="cq-dist">{fmtDistance(distM)}</span>
                 </div>
                 <div className="cq-meta">
-                  serves ~{fmtInt(asset.populationServed)} · criticality {Math.round(asset.criticality * 100)}%
+                  {asset.sub ? `${asset.sub} · ` : ""}{asset.heightM ? `${asset.heightM} m · ` : ""}serves ~{fmtInt(asset.populationServed)}{asset.estimated ? " (est.)" : ""} · criticality {Math.round(asset.criticality * 100)}%
                   {!inReach && <span className="flag stale" style={{ marginLeft: 6 }}>beyond reach</span>}
                 </div>
               </div>

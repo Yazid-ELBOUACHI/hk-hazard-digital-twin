@@ -12,9 +12,9 @@ const VIEWS: { id: ViewId; label: string; roles: Role[]; hint: string }[] = [
 
 const SPEEDS = [
   { v: 0, label: "⏸", hint: "Pause the simulation clock" },
-  { v: 60, label: "1×", hint: "1 real second = 1 simulated minute" },
-  { v: 600, label: "10×", hint: "1 real second = 10 simulated minutes" },
-  { v: 3600, label: "60×", hint: "1 real second = 1 simulated hour" },
+  { v: 1, label: "1×", hint: "Real time: 1 second per second (Hong Kong time)" },
+  { v: 10, label: "10×", hint: "10 simulated seconds per real second" },
+  { v: 60, label: "60×", hint: "1 simulated minute per real second" },
 ];
 
 export default function TopBar() {
@@ -32,10 +32,12 @@ export default function TopBar() {
   return (
     <div className="topbar">
       <div className="brand">
-        <div className="brand-mark">HK</div>
+        <a className="brand-mark hkust-mark" href="https://hkust.edu.hk" target="_blank" rel="noreferrer" aria-label="Hong Kong University of Science and Technology">
+          <img src="/brand/hkust-emblem.svg" alt="HKUST" width="26" height="38" />
+        </a>
         <div>
           <div className="brand-title">Hong Kong Landslide &amp; Flood Digital Twin</div>
-          <div className="brand-sub">Simulation-Enabled Decision Support · Prototype</div>
+          <div className="brand-sub">HKUST Research · Hazard Intelligence · Prototype</div>
         </div>
       </div>
 
@@ -59,13 +61,28 @@ export default function TopBar() {
         </button>
       )}
 
-      <div className="clockbox" title="Simulation clock (synthetic). Rainfall intensity now, simulated time, playback speed.">
-        <span>🌧 {weather ? `${weather.rainfallRateMmHr.value} mm/hr` : "—"}</span>
-        <span className="time">{fmtClock(gameTime)}</span>
+      <div
+        className="clockbox"
+        title={
+          weather?.live
+            ? `Rainfall intensity: LIVE from HKO (${weather.live.stations} stations, observation ${weather.live.obsTime.slice(11, 16)} HKT). Clock and playback speed are simulated.`
+            : "Simulation clock (synthetic). Rainfall intensity now, simulated time, playback speed."
+        }
+      >
+        <span>
+          🌧 {weather ? `${weather.rainfallRateMmHr.value} mm/hr` : "—"}
+          {weather?.live && <span className="live-dot" title="Live HKO rainfall">●</span>}
+        </span>
+        <span className="time">{fmtClock(gameTime)}{speed !== 1 && <small className="clock-mode">{speed === 0 ? "Paused" : "Simulated"}</small>}</span>
         <div className="speed-btns">
           {SPEEDS.map((s) => (
-            <button key={s.v} className={speed === s.v ? "active" : ""} onClick={() => setSpeed(s.v)} title={s.hint}>
-              {s.label}
+            <button key={s.v} className={speed === s.v ? "active" : ""} onClick={() => setSpeed(s.v)} title={s.hint} aria-label={s.hint} aria-pressed={speed === s.v}>
+              {s.v === 0 ? (
+                <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+                  <rect x="2" y="1" width="3" height="10" rx="0.8" fill="currentColor" />
+                  <rect x="7" y="1" width="3" height="10" rx="0.8" fill="currentColor" />
+                </svg>
+              ) : s.label}
             </button>
           ))}
         </div>

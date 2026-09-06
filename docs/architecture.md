@@ -1,8 +1,10 @@
 # Architecture — Hong Kong Landslide & Flood Digital Twin
 
-> **STATUS: Prototype. ALL hazard, sensor, slope, and simulation data is SYNTHETIC.**
-> Nothing in this system represents real Hong Kong government data. The basemap and
-> terrain tiles are real geography; everything painted on top of them is generated.
+> **STATUS: Prototype on real Hong Kong open data + synthetic hazard state.** Real (CSDI / HKO):
+> CEDD slope inventory and LPM works programme, CEDD landslide incidents, ENTLI natural-terrain
+> landslides, GEO raingauge record, HKO live hourly rainfall, 2021 census. Synthetic: risk scores,
+> sensors, soil parameters, simulations, active incidents, forecast. The authoritative list is
+> `src/core/dataSources.ts` (rendered as Reports → Data Sources) — update it with every data change.
 
 ## 1. Product principle
 

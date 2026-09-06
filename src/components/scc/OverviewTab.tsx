@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { registry } from "@/core/registry";
 import { useStore } from "@/state/store";
 import { timeAgo, isStale, fmtInt } from "@/core/format";
+import { fmtDistance } from "@/core/geo";
 import { RISK_COLORS, RiskAssessment, SensorReading, Slope, Asset } from "@/core/types";
 import SlopeDiagram from "./SlopeDiagram";
 import ConsequenceChain from "./ConsequenceChain";
@@ -26,6 +27,30 @@ function suggest(slope: Slope, a: RiskAssessment, gameTime: number): Suggestion[
       icon: "⚠",
       text: <>Risk expected to reach <b>{esc.category}</b> ({esc.score}/100) within <b>{esc.horizonH} h</b>. Test the forecast rainfall on this slope.</>,
       action: { label: "Run scenario", tab: "scenario" },
+    });
+  }
+  if (slope.works) {
+    out.push({
+      icon: "🏗",
+      text: (
+        <>
+          GEO has <b>programmed upgrading works</b> on this slope (LPM contract {slope.works.contract}, {slope.works.status === "in-progress" ? "under way since" : "starting"} {slope.works.startLabel}). Align monitoring
+          with the works schedule rather than planning a separate measure.
+        </>
+      ),
+    });
+  }
+  const dated = slope.realIncidents.filter((i) => i.date).sort((x, y) => y.date!.localeCompare(x.date!));
+  if (slope.realIncidents.length > 0) {
+    out.push({
+      icon: "⛰",
+      text: (
+        <>
+          <b>{slope.realIncidents.length} landslide{slope.realIncidents.length > 1 ? "s" : ""} on CEDD's record</b> for this slope{dated[0] ? `, latest ${dated[0].date!.slice(0, 10)}` : ""}. A slope that has failed before deserves a
+          lower action threshold.
+        </>
+      ),
+      action: { label: "See history", tab: "history" },
     });
   }
   if (a.confidence < 0.5) {
@@ -96,6 +121,7 @@ export default function OverviewTab({ slope, assessment, onNavigate }: { slope: 
   ];
   const staleCount = freshRows.filter((r) => isStale(r.iso, gameTime, r.staleDays)).length;
   const suggestions = suggest(slope, assessment, gameTime);
+  const dated = slope.realIncidents.filter((i) => i.date).sort((x, y) => y.date!.localeCompare(x.date!));
   const color = RISK_COLORS[assessment.category];
 
   return (
@@ -118,7 +144,18 @@ export default function OverviewTab({ slope, assessment, onNavigate }: { slope: 
               <span className="k">Model confidence</span>
               <span className="v" style={{ color: assessment.confidence < 0.5 ? "#d9a6ff" : undefined }}>{Math.round(assessment.confidence * 100)}%</span>
               <span className="k">People nearby</span>
-              <span className="v">~{fmtInt(slope.populationNearby)}</span>
+              <span className="v">
+                ~{fmtInt(slope.populationNearby)}
+                {slope.census && (
+                  <span
+                    className="badge real"
+                    style={{ marginLeft: 6, fontSize: 8.5 }}
+                    title={`2021 census: ${fmtInt(slope.census.densityPerKm2)} residents/km² in STPU group ${slope.census.stpu}, within ${slope.census.reachM} m of the slope · ${Math.round(slope.census.share65Plus * 100)}% aged 65+`}
+                  >
+                    census
+                  </span>
+                )}
+              </span>
             </div>
           </div>
           <p className="bottom-line">{assessment.explanation}</p>
@@ -208,6 +245,30 @@ export default function OverviewTab({ slope, assessment, onNavigate }: { slope: 
             );
           })}
           <div className="row-hint">Stale inputs lower model confidence and are flagged in the suggested steps above.</div>
+
+          <h3 style={{ marginTop: 14 }}>
+            Government records <span className="hint badge real">REAL</span>
+          </h3>
+          <div className="kv">
+            <span className="k">LPM works (CEDD)</span>
+            <span className="v" style={{ fontSize: 10.5 }}>
+              {slope.works ? `${slope.works.contract} · ${slope.works.status} · ${slope.works.startLabel} → ${slope.works.completionLabel}` : "not in the current programme"}
+            </span>
+            <span className="k">Landslides on record (CEDD)</span>
+            <span className="v" style={{ fontSize: 10.5 }}>
+              {slope.realIncidents.length === 0
+                ? "none"
+                : `${slope.realIncidents.length}${dated[0] ? ` · latest ${dated[0].date!.slice(0, 10)}${dated[0].volumeM3 !== null ? `, ${dated[0].volumeM3} m³` : ""}` : ""}`}
+            </span>
+            <span className="k">Natural-terrain landslides (ENTLI)</span>
+            <span className="v" style={{ fontSize: 10.5 }}>{slope.entliPerKm2 !== undefined ? `${fmtInt(slope.entliPerKm2)} crowns / km² within 500 m` : "—"}</span>
+            <span className="k">Residents (census 2021)</span>
+            <span className="v" style={{ fontSize: 10.5 }}>
+              {slope.census ? `${fmtInt(slope.census.densityPerKm2)} / km² · ${Math.round(slope.census.share65Plus * 100)}% aged 65+ · reach ${slope.census.reachM} m` : "outside census polygons — synthetic estimate"}
+            </span>
+            <span className="k">Nearest GEO raingauge</span>
+            <span className="v" style={{ fontSize: 10.5 }}>{slope.nearestGauge ? `${slope.nearestGauge.name} (${slope.nearestGauge.id}) · ${fmtDistance(slope.nearestGauge.distM)}` : "—"}</span>
+          </div>
         </div>
       </div>
 

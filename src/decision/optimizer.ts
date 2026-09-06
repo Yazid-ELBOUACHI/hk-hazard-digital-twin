@@ -1,5 +1,8 @@
 // Intervention portfolio optimizer — mock greedy logic (benefit/cost ranking).
 // Production replacement: proper MILP / multi-objective optimization service.
+//
+// Real context used: slopes already in CEDD's LPM works programme are excluded (the money is
+// committed), and the population objective weights census-derived residents by their 65+ share.
 
 import type { InterventionOption, OptimizerResult, PortfolioItem, RiskAssessment, Slope } from "@/core/types";
 
@@ -13,7 +16,9 @@ export function optimizePortfolio(
   objective: Objective
 ): OptimizerResult {
   const candidates: PortfolioItem[] = [];
+  const programmed = slopes.filter((s) => s.works).length;
   const ranked = [...slopes]
+    .filter((s) => !s.works) // already programmed by GEO — not a candidate for new money
     .filter((s) => {
       const c = assessments.get(s.id)?.category;
       return c === "elevated" || c === "high" || c === "critical";
@@ -37,12 +42,16 @@ export function optimizePortfolio(
     }
   }
 
+  const byId = new Map(slopes.map((s) => [s.id, s]));
   const value = (c: PortfolioItem): number => {
-    const slope = slopes.find((s) => s.id === c.slopeId)!;
-    const hasCritInfra = slope.nearbyAssetIds.some((id) => id.includes("AS-")) && slope.populationNearby > 800;
+    const slope = byId.get(c.slopeId)!;
+    const hasCritInfra = slope.nearbyAssetIds.some((id) => id.startsWith("FAC-") || id.includes("AS-")) && slope.populationNearby > 800;
     switch (objective) {
-      case "population":
-        return c.peopleProtected / c.costHKDm;
+      case "population": {
+        // vulnerability weighting: an elderly-heavy neighbourhood (census 2021) counts more per head
+        const vulnerability = 1 + (slope.census?.share65Plus ?? 0.2) * 1.5;
+        return (c.peopleProtected * vulnerability) / c.costHKDm;
+      }
       case "critical-infra":
         return (c.riskReduction * (hasCritInfra ? 2.5 : 0.6)) / c.costHKDm;
       default:
@@ -74,6 +83,6 @@ export function optimizePortfolio(
     items: chosen,
     totalRiskReduction: +chosen.reduce((s, c) => s + c.riskReduction, 0).toFixed(0),
     totalPeopleProtected: chosen.reduce((s, c) => s + c.peopleProtected, 0),
-    note: "Mock greedy benefit/cost optimization on synthetic data — demonstration only.",
+    note: `Mock greedy benefit/cost optimization on a synthetic risk score — demonstration only. ${programmed} slopes already in CEDD's LPM works programme are excluded; residents within reach come from the 2021 census.`,
   };
 }

@@ -1,0 +1,58 @@
+{
+  "census": {
+    "bakedOn": "2026-09-06",
+    "units": 211,
+    "population": 7411945
+  },
+  "rainfall": {
+    "bakedOn": "2026-09-06",
+    "gauges": 97,
+    "validReadings": 1101978,
+    "firstDate": "19840101",
+    "lastDate": "20260630",
+    "days": 15522,
+    "incidents": 10854,
+    "datedIncidents": 7948,
+    "linkedIncidents": 4558,
+    "linkedSlopes": 3685,
+    "wettestDay": {
+      "date": "1994-07-22",
+      "mm": 875.5,
+      "gauge": "Tsuen Wan"
+    }
+  },
+  "entli": {
+    "bakedOn": "2026-09-06",
+    "crowns": 113166,
+    "cells": 12724,
+    "cellM": 250,
+    "recent": 23378,
+    "relict": 89788,
+    "years": [
+      1924,
+      2023
+    ]
+  },
+  "hko": {
+    "bakedOn": "2026-09-06",
+    "stations": 36,
+    "obsTime": "2026-09-06T16:00:00+08:00"
+  },
+  "facilities": {
+    "bakedOn": "2026-09-06",
+    "hospital": 44,
+    "fire-station": 95,
+    "police": 40,
+    "clinic": 200,
+    "school": 1319,
+    "kindergarten": 1217
+  },
+  "assets": {
+    "bakedOn": "2026-09-06",
+    "slopes": 4155,
+    "withBuildings": 3349,
+    "withRoad": 4021,
+    "buildings": 342223,
+    "roadSegments": 39877
+  }
+}

@@ -27,9 +27,9 @@ export default function EmergencyPanel() {
   const deployedIds = new Set(deployments.map((d) => d.resource.id));
 
   return (
-    <div className="side right" style={{ width: 380, background: "#0e0a0a", borderLeft: "1px solid #3a1c1c" }}>
+    <div className="side right em-side">
       {kpi && (
-        <div className="panel" style={{ borderBottom: "1px solid #3a1c1c" }}>
+        <div className="panel">
           <h3 style={{ color: "#c98f8f" }}>Situation</h3>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, textAlign: "center" }}>
             <div className="em-card" style={{ margin: 0, padding: "10px 6px" }}>
@@ -53,7 +53,7 @@ export default function EmergencyPanel() {
         </div>
       )}
 
-      <div className="panel" style={{ borderBottom: "1px solid #3a1c1c" }}>
+      <div className="panel">
         <h3 style={{ color: "#c98f8f" }}>Active Threats</h3>
         {threats.map(({ s, a }) => (
           <div
@@ -77,7 +77,7 @@ export default function EmergencyPanel() {
         ))}
       </div>
 
-      <div className="panel" style={{ borderBottom: "1px solid #3a1c1c" }}>
+      <div className="panel">
         <h3 style={{ color: "#c98f8f" }}>Recommended Deployments</h3>
         {deployments.map((d) => (
           <div key={d.resource.id} className="alert-row" style={{ background: "#150d0d", alignItems: "flex-start" }} onClick={() => flyToSlope(d.slopeId)}>

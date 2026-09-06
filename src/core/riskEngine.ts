@@ -4,6 +4,7 @@
 // DEMONSTRATION MODEL — NOT FOR ENGINEERING DECISIONS.
 
 import type { RiskEngine } from "./interfaces";
+import { yieldForMap } from "./schedule";
 import {
   KpiSnapshot,
   RiskAssessment,
@@ -98,8 +99,8 @@ export class HeuristicRiskEngine implements RiskEngine {
     return { confidence, sensorCoverage, geometryConfidence, parameterUncertainty, freshnessPenalty };
   }
 
-  private scoreAtHorizon(slope: Slope, gameTime: number, plusH: number): number {
-    const f = this.features(slope, gameTime);
+  private scoreAtHorizon(slope: Slope, gameTime: number, plusH: number, f0?: DynamicFeatures): number {
+    const f = f0 ?? this.features(slope, gameTime);
     if (plusH === 0) return this.rawScore(slope, f).score;
     const futureRain = this.projectRain24(gameTime, plusH);
     // saturation memory: pore pressure follows rain with lag
@@ -125,7 +126,7 @@ export class HeuristicRiskEngine implements RiskEngine {
       .sort((a, b) => b.sharePct - a.sharePct);
 
     const trajectory: TrajectoryPoint[] = HORIZONS.map((h) => {
-      const s = this.scoreAtHorizon(slope, gameTime, h);
+      const s = this.scoreAtHorizon(slope, gameTime, h, f);
       return { horizonH: h, score: Math.round(s), category: scoreToCategory(s, slope.hasData) };
     });
 
@@ -166,6 +167,24 @@ export class HeuristicRiskEngine implements RiskEngine {
     return m;
   }
 
+  /** ~4,000 slopes in slices of 250 with a yield between slices: no task longer than a few ms. */
+  async assessAllAsync(slopes: Slope[], gameTime: number): Promise<Map<string, RiskAssessment>> {
+    const m = new Map<string, RiskAssessment>();
+    const CHUNK = 64;
+    for (let i = 0; i < slopes.length; i += CHUNK) {
+      await yieldForMap();
+      const end = Math.min(slopes.length, i + CHUNK);
+      for (let k = i; k < end; k++) m.set(slopes[k].id, this.assess(slopes[k], gameTime));
+
+    }
+    return m;
+  }
+
+  projectScore(slope: Slope, gameTime: number, plusHours: number): { score: number; category: RiskCategory } {
+    const s = this.scoreAtHorizon(slope, gameTime, plusHours);
+    return { score: Math.round(s), category: scoreToCategory(s, slope.hasData) };
+  }
+
   projectUnderStorm(slope: Slope, gameTime: number, plusHours: number): RiskAssessment {
     const s = this.scoreAtHorizon(slope, gameTime, plusHours);
     const base = this.assess(slope, gameTime);
@@ -195,7 +214,7 @@ export class HeuristicRiskEngine implements RiskEngine {
     );
     const forecast = Math.round(this.ctx.forecast24Mm(gameTime));
 
-    const prev = this.assessPrevCounts(slopes, gameTime - 24 * 3600_000);
+    const prev = await this.prevCounts(slopes, gameTime - 24 * 3600_000);
     const trendOf = (now: number, before: number): Trend => (now > before ? "up" : now < before ? "down" : "stable");
 
     const critical = count("critical");
@@ -229,15 +248,33 @@ export class HeuristicRiskEngine implements RiskEngine {
     };
   }
 
-  private assessPrevCounts(slopes: Slope[], gameTime: number) {
+  // The −24 h comparison only feeds trend arrows: memoised per game-hour and computed in yielding
+  // slices, so it never adds a long task to the refresh.
+  private prevMemo: { key: number; value: { critical: number; high: number; moderate: number; population: number; rain: number } } | null = null;
+  private async prevCounts(slopes: Slope[], gameTime: number) {
+    const key = Math.round(gameTime / 3600_000) ^ (slopes.length << 12);
+    if (this.prevMemo?.key === key) return this.prevMemo.value;
+    const value = await this.assessPrevCounts(slopes, gameTime);
+    this.prevMemo = { key, value };
+    return value;
+  }
+
+  private async assessPrevCounts(slopes: Slope[], gameTime: number) {
     let critical = 0, high = 0, moderate = 0, population = 0;
-    for (const s of slopes) {
-      const f = this.features(s, gameTime);
-      const sc = this.rawScore(s, f).score;
-      const c = scoreToCategory(sc, s.hasData);
-      if (c === "critical") { critical++; population += s.populationNearby; }
-      else if (c === "high") { high++; population += s.populationNearby; }
-      else if (c === "moderate") moderate++;
+    const CHUNK = 64;
+    for (let i = 0; i < slopes.length; i += CHUNK) {
+      await yieldForMap();
+      const end = Math.min(slopes.length, i + CHUNK);
+      for (let k = i; k < end; k++) {
+        const s = slopes[k];
+        const f = this.features(s, gameTime);
+        const sc = this.rawScore(s, f).score;
+        const c = scoreToCategory(sc, s.hasData);
+        if (c === "critical") { critical++; population += s.populationNearby; }
+        else if (c === "high") { high++; population += s.populationNearby; }
+        else if (c === "moderate") moderate++;
+      }
+
     }
     const rain = Math.round(slopes.slice(0, 40).reduce((sum, s) => sum + this.features(s, gameTime).rain24Mm, 0) / 40);
     return { critical, high, moderate, population, rain };

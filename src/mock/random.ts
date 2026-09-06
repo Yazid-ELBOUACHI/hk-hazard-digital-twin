@@ -28,14 +28,43 @@ export function rngFor(...keys: (string | number)[]) {
   return mulberry32(seed);
 }
 
-/** Deterministic smooth-ish noise in [0,1] as a function of continuous x, per key. */
-export function smoothNoise(key: string, x: number): number {
+// Hot-path caches: the risk pass evaluates ~40k noise samples per refresh, so key strings are hashed
+// once and small integer hashes are tabulated. Outputs are identical to the string-keyed form.
+const keySeeds = new Map<string, number>();
+export function keySeed(key: string): number {
+  let h = keySeeds.get(key);
+  if (h === undefined) {
+    h = hashStr(key);
+    keySeeds.set(key, h);
+  }
+  return h;
+}
+const INT_HASH: number[] = [];
+function intHash(i: number): number {
+  if (i >= 0 && i < 8192) {
+    let h = INT_HASH[i];
+    if (h === undefined) {
+      h = hashStr(String(i));
+      INT_HASH[i] = h;
+    }
+    return h;
+  }
+  return hashStr(String(i));
+}
+
+/** smoothNoise on a precomputed key seed (see keySeed) — same values, no string work. */
+export function smoothNoiseSeed(seed: number, x: number): number {
   const i = Math.floor(x);
   const f = x - i;
-  const a = rngFor(key, i)();
-  const b = rngFor(key, i + 1)();
+  const a = mulberry32((GLOBAL_SEED ^ seed ^ intHash(i)) >>> 0)();
+  const b = mulberry32((GLOBAL_SEED ^ seed ^ intHash(i + 1)) >>> 0)();
   const u = f * f * (3 - 2 * f); // smoothstep
   return a * (1 - u) + b * u;
+}
+
+/** Deterministic smooth-ish noise in [0,1] as a function of continuous x, per key. */
+export function smoothNoise(key: string, x: number): number {
+  return smoothNoiseSeed(keySeed(key), x);
 }
 
 export function pick<T>(rng: () => number, arr: readonly T[]): T {

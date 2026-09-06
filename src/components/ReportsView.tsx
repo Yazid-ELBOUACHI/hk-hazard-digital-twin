@@ -5,16 +5,34 @@ import { generateSitrep } from "@/decision/sitrep";
 import { fmtClock, timeAgo } from "@/core/format";
 import type { ValidationRecord } from "@/core/types";
 import { LineChart, Line, XAxis, YAxis, ResponsiveContainer, Tooltip, CartesianGrid, Legend } from "recharts";
+import DataSourcesPane from "./DataSourcesPane";
+import RainfallLandslidesPane from "./RainfallLandslidesPane";
+import type { ReportsTabId } from "@/state/store";
+
+const TABS: { id: ReportsTabId; label: string; hint: string; real?: boolean }[] = [
+  { id: "sitrep", label: "Situation Report", hint: "Operational briefing generated from the twin state" },
+  { id: "validation", label: "Model Validation", hint: "Predicted vs observed on synthetic historical incidents" },
+  { id: "rainfall", label: "Rainfall & Landslides", hint: "REAL DATA — 40 years of GEO raingauge records against CEDD landslide incidents", real: true },
+  { id: "sources", label: "Data Sources", hint: "Every dataset: what it is, how it is connected, real or synthetic, how fresh", real: true },
+];
 
 export default function ReportsView() {
-  const [tab, setTab] = useState<"sitrep" | "validation">("sitrep");
+  const tab = useStore((s) => s.reportsTab);
+  const setTab = useStore((s) => s.setReportsTab);
   return (
     <div className="page">
-      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-        <button className={`chip ${tab === "sitrep" ? "on" : ""}`} onClick={() => setTab("sitrep")}>Situation Report</button>
-        <button className={`chip ${tab === "validation" ? "on" : ""}`} onClick={() => setTab("validation")}>Model Validation</button>
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+        {TABS.map((t) => (
+          <button key={t.id} className={`chip ${tab === t.id ? "on" : ""}`} onClick={() => setTab(t.id)} title={t.hint}>
+            {t.label}
+            {t.real && <span style={{ marginLeft: 6, color: "#18b8a6", fontSize: 8.5, fontWeight: 700, letterSpacing: 0.6 }}>REAL</span>}
+          </button>
+        ))}
       </div>
-      {tab === "sitrep" ? <SitrepPane /> : <ValidationPane />}
+      {tab === "sitrep" && <SitrepPane />}
+      {tab === "validation" && <ValidationPane />}
+      {tab === "rainfall" && <RainfallLandslidesPane />}
+      {tab === "sources" && <DataSourcesPane />}
     </div>
   );
 }

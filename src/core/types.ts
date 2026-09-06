@@ -66,6 +66,33 @@ export interface SlopeEvent {
   kind: SlopeEventKind;
   label: string;
   detail?: string;
+  real?: boolean; // true = from a real government record (CEDD incident database, LPMitP programme)
+}
+
+/** REAL — CEDD Landslip Prevention and Mitigation Programme (LPMitP) works entry for this slope. */
+export interface WorksProgramme {
+  kind: "slope" | "catchment";
+  contract: string; // e.g. "GE/2025/10"
+  location: string;
+  startLabel: string; // "3rd Qtr of 2025" (as published)
+  completionLabel: string;
+  status: "pending" | "in-progress"; // derived from the published start quarter vs game time
+}
+
+/** REAL — 2021 Population Census small-TPU context used to estimate residents within reach. */
+export interface CensusContext {
+  stpu: string; // small tertiary planning unit group code
+  densityPerKm2: number;
+  share65Plus: number; // 0..1
+  shareUnder15: number; // 0..1
+  reachM: number; // radius of the disc used for populationNearby
+}
+
+/** REAL — CEDD landslide incident record that references this registered slope number. */
+export interface RealIncident {
+  date: string | null; // ISO date, null when the record is undated
+  volumeM3: number | null;
+  ref: string; // CEDD incident reference
 }
 
 export interface FreshnessRecord {
@@ -113,9 +140,15 @@ export interface Slope {
   history: SlopeEvent[];
   freshness: FreshnessRecord;
   susceptibility: number; // 0..1 static baseline
-  populationNearby: number;
+  populationNearby: number; // residents within reach — census-derived when `census` is set, otherwise synthetic
   hasData: boolean; // false → GREY on the map
-  isSynthetic: true;
+  isSynthetic: true; // hazard state (sensors, soil, risk) is synthetic; the fields below marked REAL are not
+  // ---- REAL context joined from government open data (undefined / empty when unavailable) ----
+  works?: WorksProgramme; // CEDD LPMitP upgrading works programme
+  census?: CensusContext; // C&SD 2021 census small-TPU
+  entliPerKm2?: number; // ENTLI natural-terrain landslide crowns within ~500 m, per km²
+  realIncidents: RealIncident[]; // CEDD incidents referencing this slope number
+  nearestGauge?: { id: string; name: string; distM: number }; // GEO raingauge (1984→present daily record)
 }
 
 export interface SensorReading {
@@ -126,14 +159,26 @@ export interface SensorReading {
   latest: Provenance<number>;
 }
 
+/** REAL — summary of the latest HKO live rainfall observation behind the weather state. */
+export interface LiveRainSummary {
+  obsTime: string; // HKO observation time (ISO, HKT)
+  fetchedAt: string;
+  stations: number;
+  maxMmHr: number;
+  meanMmHr: number;
+  hours24: number; // hours behind the 24-h totals (24 = complete window)
+  source: "server" | "direct";
+}
+
 export interface WeatherState {
   rainfallLast24hMm: Provenance<number>;
   rainfallRateMmHr: Provenance<number>;
-  forecast72h: { t: string; mmHr: number }[]; // hourly forecast
+  forecast72h: { t: string; mmHr: number }[]; // hourly forecast (synthetic)
   stormActive: boolean;
   stormName?: string;
   stormEtaHours?: number;
   temperatureC: number;
+  live?: LiveRainSummary; // set when the rainfall provenance above is real HKO data
 }
 
 export type IncidentKind = "landslide" | "rockfall" | "debris-flow" | "road-blockage" | "flooding";
@@ -154,6 +199,10 @@ export type AssetKind =
   | "building"
   | "hospital"
   | "school"
+  | "kindergarten"
+  | "clinic"
+  | "fire-station"
+  | "police"
   | "railway"
   | "drainage"
   | "utility"
@@ -167,6 +216,11 @@ export interface Asset {
   line?: [number, number][]; // for roads/railways
   populationServed: number;
   criticality: number; // 0..1
+  sub?: string; // real assets: published subtype (e.g. "Aided primary", "Tower", "Trunk Road")
+  real?: boolean; // location/name from government open data (LandsD, HA, EDB, FSD, HKPF, DH)
+  estimated?: boolean; // populationServed / criticality are kind-based estimates, not published values
+  heightM?: number; // LandsD building block height
+  distM?: number; // distance from the slope it was joined to
 }
 
 export interface RiskDriver {

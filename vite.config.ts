@@ -1,9 +1,18 @@
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
+import { liveRainHandler } from "./server/liveRain.js";
+
+/** Serve the live HKO rainfall proxy in `npm run dev` too, so development sees real live data. */
+const liveRainDevApi: Plugin = {
+  name: "live-rain-dev-api",
+  configureServer(server) {
+    server.middlewares.use("/api/live/rainfall", (req, res) => void liveRainHandler(req, res));
+  },
+};
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), liveRainDevApi],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "src"),

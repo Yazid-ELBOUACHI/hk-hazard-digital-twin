@@ -3,9 +3,11 @@
 import {
   Asset,
   AssetKind,
+  CensusContext,
   Incident,
   Mitigation,
   MitigationType,
+  RealIncident,
   Region,
   SensorKind,
   SensorMeta,
@@ -13,14 +15,23 @@ import {
   SlopeEvent,
   SlopeType,
   ValidationRecord,
+  WorksProgramme,
 } from "@/core/types";
 import { HILL_CLUSTERS, HillCluster, samplePointInCluster, sampleUniformInCluster, walkInsideCluster, offsetM, distanceM, pointInRing } from "./geo";
 import { TERRAIN_GRIDS, TerrainGrid } from "./terrainGrid";
 import { clamp, pick, range, rangeInt, rngFor } from "./random";
-import { fetchRealSlopeShells, RealSlopeShell } from "@/live/csdi";
+import { fetchRealSlopeShells, RealSlopeShell, fetchLpmWorks, LpmWork, LpmWorks, normSlopeNo, quarterLabelToIso } from "@/live/csdi";
+import { reportSource } from "@/core/dataSources";
+import { buildRealAssets, loadRealAssets, type RealAssetData } from "@/live/realAssets";
+import { RAIN_GAUGES } from "@/live/baked/gauges";
+import { u16 } from "@/live/baked/decode";
+import type { CensusUnit } from "@/live/baked/census";
+import type { EntliGrid } from "@/live/baked/entliGrid";
+import type { SlopeIncidentRow } from "@/live/baked/slopeIncidents";
 
 /** Fixed game-time origin so all freshness/history math is deterministic. */
-export const GAME_EPOCH = Date.parse("2026-09-04T08:00:00Z");
+// Each session starts now; synthetic signals remain seeded relative to this epoch.
+export const GAME_EPOCH = Date.now();
 
 const SLOPE_COUNT = 5000;
 
@@ -157,27 +168,164 @@ function terrainAt(p: [number, number]): { slopeDeg: number; aspectDeg: number; 
   return null;
 }
 
-// ---------- real slope inventory (CEDD Catalogue of Slopes via CSDI) ----------
+// ---------- real slope inventory & real context (CEDD / C&SD via CSDI) ----------
 //
 // When the fetch succeeds, the twin's slope inventory uses REAL registered slope polygons and
-// registration attributes (slope no., district, height, angle, maintenance party). All hazard
-// state layered on top — sensors, soil, risk, history — remains synthetic. If CSDI is
-// unreachable the generator falls back to the fully synthetic cluster placement below.
+// registration attributes (slope no., district, height, angle, maintenance party). Real context is
+// then joined onto each slope: the LPM works programme and CEDD landslide incidents (by slope
+// number), 2021 census population and ENTLI landslide density (by location), and the nearest GEO
+// raingauge. Sensors, soil parameters, risk and the remaining history events stay synthetic.
+// If CSDI is unreachable the generator falls back to the fully synthetic cluster placement below.
 
 let realShells: RealSlopeShell[] | null = null;
+let lpmBySlope = new Map<string, LpmWork>();
+let censusUnits: CensusUnit[] = [];
+let entli: { g: EntliGrid; k: Map<number, number>; recent: Uint16Array; relict: Uint16Array } | null = null;
+let slopeIncidents: Record<string, SlopeIncidentRow[]> = {};
+let incidentsLoaded = false; // once real incident records are in, no synthetic incidents are invented
+let realAssetData: RealAssetData | null = null; // facilities + per-slope buildings/roads (LandsD, HA, EDB, FSD, HKPF, DH)
 
-/** Fetch the real inventory before the first getDataset() call. Returns false on fallback. */
+/** Baked real context (census, ENTLI grid, per-slope incidents) — separate chunks, loaded in parallel with the inventory. */
+async function loadBakedContext(): Promise<void> {
+  const [c, e, i, ra] = await Promise.all([import("@/live/baked/census"), import("@/live/baked/entliGrid"), import("@/live/baked/slopeIncidents"), loadRealAssets()]);
+  realAssetData = ra;
+  censusUnits = c.CENSUS_UNITS;
+  const g = e.ENTLI_GRID;
+  const cells = u16(g.cells);
+  const k = new Map<number, number>();
+  cells.forEach((cell, idx) => k.set(cell, idx));
+  entli = { g, k, recent: u16(g.recent), relict: u16(g.relict) };
+  slopeIncidents = i.SLOPE_INCIDENTS;
+  incidentsLoaded = true;
+  reportSource("census-2021", { ok: true, count: censusUnits.length });
+  reportSource("cedd-entli-grid", { ok: true, count: cells.length, note: `${g.totals.recent.toLocaleString()} recent · ${g.totals.relict.toLocaleString()} relict crowns` });
+  reportSource("cedd-incidents-slope", { ok: true, count: Object.keys(slopeIncidents).length, note: "registered slopes with ≥ 1 recorded incident" });
+}
+
+/** Fetch the real inventory and context before the first getDataset() call. Returns false on fallback. */
 export async function prepareRealSlopes(): Promise<boolean> {
   if (realShells) return true;
+  const bakedP = loadBakedContext().catch((err) => console.warn("Baked real context unavailable.", err));
+  let ok = false;
   try {
-    const shells = await fetchRealSlopeShells();
+    const lpm = await fetchLpmWorks().catch((err): LpmWorks | null => {
+      console.warn("CSDI LPM works programme unavailable.", err);
+      return null;
+    });
+    if (lpm) lpmBySlope = new Map(lpm.slopes.map((w) => [w.key, w]));
+    const shells = await fetchRealSlopeShells(lpm ? lpm.slopes.map((w) => w.slopeNo) : []);
     if (shells.length < 500) throw new Error(`only ${shells.length} shells`);
     realShells = shells;
-    return true;
+    ok = true;
   } catch (err) {
     console.warn("CSDI slope inventory unavailable — using synthetic slope placement.", err);
-    return false;
+    reportSource("cedd-slopes", { ok: false, note: String((err as Error)?.message ?? err) });
   }
+  await bakedP;
+  return ok;
+}
+
+const RAIN_EPOCH_MS = Date.UTC(1984, 0, 1);
+const isoFromDay = (day: number) => new Date(RAIN_EPOCH_MS + day * 86400_000).toISOString();
+
+/** Census unit containing a point — smallest containing polygon wins (holes are simply other units). */
+function censusAt(p: [number, number]): CensusUnit | null {
+  let best: CensusUnit | null = null;
+  for (const u of censusUnits) {
+    const b = u.bbox;
+    if (p[0] < b[0] || p[0] > b[2] || p[1] < b[1] || p[1] > b[3]) continue;
+    if (!u.rings.some((r) => pointInRing(p, r))) continue;
+    if (!best || u.areaM2 < best.areaM2) best = u;
+  }
+  return best;
+}
+
+/** ENTLI landslide crowns per km² within ~500 m of a point (5×5 block of 250 m cells). */
+function entliDensityAt(p: [number, number]): number | undefined {
+  if (!entli) return undefined;
+  const { g, k, recent, relict } = entli;
+  const q0 = Math.floor((p[0] - g.lon0) / g.dLon);
+  const r0 = Math.floor((p[1] - g.lat0) / g.dLat);
+  if (q0 < -2 || r0 < -2 || q0 >= g.cols + 2 || r0 >= g.rows + 2) return undefined;
+  let n = 0;
+  for (let r = r0 - 2; r <= r0 + 2; r++) {
+    for (let q = q0 - 2; q <= q0 + 2; q++) {
+      if (q < 0 || r < 0 || q >= g.cols || r >= g.rows) continue;
+      const idx = k.get(r * g.cols + q);
+      if (idx !== undefined) n += recent[idx] + relict[idx];
+    }
+  }
+  return Math.round(n / (25 * 0.0625)); // 25 cells × 0.0625 km²
+}
+
+function nearestGauge(p: [number, number]): Slope["nearestGauge"] {
+  let best: (typeof RAIN_GAUGES)[number] | null = null;
+  let bestD = Infinity;
+  for (const g of RAIN_GAUGES) {
+    const d = distanceM(p, [g.lon, g.lat]);
+    if (d < bestD) { bestD = d; best = g; }
+  }
+  return best ? { id: best.id, name: best.name, distM: Math.round(bestD) } : undefined;
+}
+
+interface RealContext {
+  works?: WorksProgramme;
+  census?: CensusContext;
+  populationNearby?: number; // census-derived residents within reach
+  entliPerKm2?: number;
+  realIncidents: RealIncident[];
+  events: SlopeEvent[]; // real history events (works, incidents)
+  nearestGauge?: Slope["nearestGauge"];
+}
+
+/** Everything real we can say about one slope from government open data. */
+function realContextFor(id: string, centroid: [number, number], heightM: number): RealContext {
+  const key = normSlopeNo(id);
+  const events: SlopeEvent[] = [];
+
+  let works: WorksProgramme | undefined;
+  const w = lpmBySlope.get(key);
+  if (w) {
+    const startIso = quarterLabelToIso(w.startLabel);
+    const status = startIso && Date.parse(startIso) <= GAME_EPOCH ? "in-progress" : "pending";
+    works = { kind: w.kind, contract: w.contract, location: w.location, startLabel: w.startLabel, completionLabel: w.completionLabel, status };
+    events.push({
+      date: startIso ?? new Date(GAME_EPOCH).toISOString(),
+      kind: "works",
+      label: `LPM upgrading works — contract ${w.contract}`,
+      detail: `CEDD LPMitP programme: start ${w.startLabel}, completion ${w.completionLabel} (${status}).`,
+      real: true,
+    });
+  }
+
+  const realIncidents: RealIncident[] = (slopeIncidents[key] ?? []).map(([day, vol, ref]) => ({
+    date: day >= 0 ? isoFromDay(day) : null,
+    volumeM3: vol >= 0 ? vol : null,
+    ref,
+  }));
+  for (const inc of realIncidents) {
+    if (!inc.date) continue;
+    events.push({
+      date: inc.date,
+      kind: "incident",
+      label: `Landslide incident ${inc.ref}${inc.volumeM3 !== null ? ` — ${inc.volumeM3} m³` : ""}`,
+      detail: "CEDD landslide incident database (real record).",
+      real: true,
+    });
+  }
+
+  let census: CensusContext | undefined;
+  let populationNearby: number | undefined;
+  const u = censusAt(centroid);
+  if (u && u.pop > 0 && u.areaM2 > 0) {
+    // residents inside a disc of ~2× slope height around the feature, at the local census density
+    const reachM = clamp(heightM * 2.1, 40, 220);
+    const densityPerKm2 = u.pop / (u.areaM2 / 1e6);
+    census = { stpu: u.code, densityPerKm2: Math.round(densityPerKm2), share65Plus: u.age[4] / u.pop, shareUnder15: u.age[0] / u.pop, reachM: Math.round(reachM) };
+    populationNearby = Math.round((densityPerKm2 * Math.PI * reachM * reachM) / 1e6);
+  }
+
+  return { works, census, populationNearby, entliPerKm2: entliDensityAt(centroid), realIncidents, events, nearestGauge: nearestGauge(centroid) };
 }
 
 function titleCase(s: string): string {
@@ -195,21 +343,25 @@ function slopeTypeFor(id: string, rng: () => number): SlopeType {
 }
 
 /** Build twin slopes from real CEDD shells; synthetic enrichment is seeded per slope id. */
-function slopesFromShells(shells: RealSlopeShell[], assets: Asset[]): Slope[] {
-  // pre-bucket assets by cluster index (asset ids embed "-<clusterIndex>-")
-  const clusterAssets = HILL_CLUSTERS.map((_, ci) => assets.filter((a) => a.id.includes(`-${ci}-`)));
+function slopesFromShells(shells: RealSlopeShell[], assets: Asset[], nearbyReal?: Map<string, string[]>): Slope[] {
+  // pre-bucket assets by cluster index (asset ids embed "-<clusterIndex>-") — synthetic fallback only
+  const clusterAssets = nearbyReal ? [] : HILL_CLUSTERS.map((_, ci) => assets.filter((a) => a.id.includes(`-${ci}-`)));
+  const assetById = new Map(assets.map((a) => [a.id, a]));
   const slopes: Slope[] = [];
   for (const shell of shells) {
     const rng = rngFor("slope", shell.id);
     const t = terrainAt(shell.centroid);
     const slopeAngleDeg = shell.angleDeg > 0 ? clamp(shell.angleDeg, 10, 88) : Math.round(range(rng, 25, 55));
     const heightM = clamp(shell.heightM, 3, 250);
+    const ctx = realContextFor(shell.id, shell.centroid, heightM);
+    // local natural-terrain landslide density (real, ENTLI) replaces one random term of the baseline
+    const entliTerm = ctx.entliPerKm2 !== undefined ? clamp(Math.log10(1 + ctx.entliPerKm2) / 2.5, 0, 1) : rng();
     const susceptibility = clamp(
       0.28 * ((slopeAngleDeg - 22) / 40) +
         0.22 * rng() +
         0.2 * rng() * rng() +
         0.15 * (heightM / 180) +
-        0.15 * rng(),
+        0.15 * entliTerm,
       0.03,
       0.97
     );
@@ -223,7 +375,10 @@ function slopesFromShells(shells: RealSlopeShell[], assets: Asset[]): Slope[] {
       const d = (c.lon - shell.centroid[0]) ** 2 + (c.lat - shell.centroid[1]) ** 2;
       if (d < bestD) { bestD = d; ci = i; }
     });
-    const nearby = clusterAssets[ci].filter(() => rng() < 0.22).slice(0, 4);
+    // real neighbours (LandsD buildings/road + facilities within 500 m) when baked; synthetic cluster assets otherwise
+    const nearby = nearbyReal
+      ? (nearbyReal.get(normSlopeNo(shell.id)) ?? []).map((id) => assetById.get(id)).filter((a): a is Asset => !!a)
+      : clusterAssets[ci].filter(() => rng() < 0.22).slice(0, 4);
 
     slopes.push({
       id: shell.id,
@@ -254,7 +409,7 @@ function slopesFromShells(shells: RealSlopeShell[], assets: Asset[]): Slope[] {
       mitigations: makeMitigations(rng, susceptibility),
       nearbyAssetIds: nearby.map((a) => a.id),
       sensors: makeSensors(shell.id, rng, instrumented),
-      history: makeHistory(rng, susceptibility),
+      history: [...makeHistory(rng, susceptibility, !incidentsLoaded), ...ctx.events].sort((a, b) => a.date.localeCompare(b.date)),
       freshness: {
         sensor: new Date(GAME_EPOCH - rangeInt(rng, 1, 30) * 60_000).toISOString(),
         rainfall: new Date(GAME_EPOCH - rangeInt(rng, 2, 15) * 60_000).toISOString(),
@@ -264,11 +419,16 @@ function slopesFromShells(shells: RealSlopeShell[], assets: Asset[]): Slope[] {
         record: isoDaysAgo(rangeInt(rng, 1, 60)),
       },
       susceptibility,
-      populationNearby: Math.round(
-        Math.exp(range(rng, Math.log(15), Math.log(1800))) + nearby.filter((a) => a.kind === "building").length * range(rng, 80, 400)
-      ),
+      populationNearby:
+        ctx.populationNearby ??
+        Math.round(Math.exp(range(rng, Math.log(15), Math.log(1800))) + nearby.filter((a) => a.kind === "building").length * range(rng, 80, 400)),
       hasData,
       isSynthetic: true, // hazard state is synthetic; geometry & registration are CEDD
+      works: ctx.works,
+      census: ctx.census,
+      entliPerKm2: ctx.entliPerKm2,
+      realIncidents: ctx.realIncidents,
+      nearestGauge: ctx.nearestGauge,
     });
   }
   return slopes;
@@ -380,7 +540,7 @@ function makeSensors(slopeId: string, rng: () => number, instrumented: boolean):
   }));
 }
 
-function makeHistory(rng: () => number, susceptibility: number): SlopeEvent[] {
+function makeHistory(rng: () => number, susceptibility: number, allowSyntheticIncident = true): SlopeEvent[] {
   const events: SlopeEvent[] = [];
   const templates: { kind: SlopeEvent["kind"]; label: string }[] = [
     { kind: "inspection", label: "Routine engineer inspection" },
@@ -398,7 +558,7 @@ function makeHistory(rng: () => number, susceptibility: number): SlopeEvent[] {
     const daysAgo = rangeInt(rng, 10, 2900);
     events.push({ date: isoDaysAgo(daysAgo), kind: t.kind, label: t.label });
   }
-  if (susceptibility > 0.72 && rng() < 0.5) {
+  if (allowSyntheticIncident && susceptibility > 0.72 && rng() < 0.5) {
     events.push({
       date: isoDaysAgo(rangeInt(rng, 200, 2200)),
       kind: "incident",
@@ -465,15 +625,23 @@ function generateAssetsFor(cluster: HillCluster, ci: number): Asset[] {
 export function generateDataset(): Dataset {
   const totalWeight = HILL_CLUSTERS.reduce((s, c) => s + c.weight, 0);
   const slopes: Slope[] = [];
-  const assets: Asset[] = [];
+  let assets: Asset[] = [];
+  let nearbyReal: Map<string, string[]> | undefined;
 
-  HILL_CLUSTERS.forEach((cluster, ci) => {
-    assets.push(...generateAssetsFor(cluster, ci));
-  });
+  if (realShells?.length && realAssetData) {
+    // REAL exposure: facilities + LandsD buildings/roads joined to each registered slope
+    const built = buildRealAssets(realShells.map((s) => ({ id: s.id, centroid: s.centroid })), realAssetData);
+    assets = built.assets;
+    nearbyReal = built.nearby;
+  } else {
+    HILL_CLUSTERS.forEach((cluster, ci) => {
+      assets.push(...generateAssetsFor(cluster, ci));
+    });
+  }
 
   // Preferred path: real CEDD slope polygons (prepared by prepareRealSlopes() at boot).
   if (realShells?.length) {
-    slopes.push(...slopesFromShells(realShells, assets));
+    slopes.push(...slopesFromShells(realShells, assets, nearbyReal));
   }
 
   let counter = 0;
@@ -538,6 +706,7 @@ export function generateDataset(): Dataset {
       const hasData = rng() > 0.07; // ~7% grey: insufficient data
       const slopeType = pick(rng, SLOPE_TYPES);
       const nearby = clusterAssets.filter(() => rng() < 0.22).slice(0, 4);
+      const ctx = realContextFor(id, centroid, heightM); // census / ENTLI / gauge by location (ids are synthetic, so no works or incidents)
 
       slopes.push({
         id,
@@ -580,9 +749,15 @@ export function generateDataset(): Dataset {
         susceptibility,
         // residents within the slope's reach (log-uniform 15–1,800, denser where residential blocks are linked);
         // asset service catchments are NOT counted here — they are indirect exposure, shown separately
-        populationNearby: Math.round(Math.exp(range(rng, Math.log(15), Math.log(1800))) + nearby.filter((a) => a.kind === "building").length * range(rng, 80, 400)),
+        populationNearby:
+          ctx.populationNearby ??
+          Math.round(Math.exp(range(rng, Math.log(15), Math.log(1800))) + nearby.filter((a) => a.kind === "building").length * range(rng, 80, 400)),
         hasData,
         isSynthetic: true,
+        census: ctx.census,
+        entliPerKm2: ctx.entliPerKm2,
+        realIncidents: [],
+        nearestGauge: ctx.nearestGauge,
       });
     }
   });

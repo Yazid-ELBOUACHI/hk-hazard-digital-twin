@@ -41,10 +41,69 @@ export default function PlanningView() {
     flyToSlope(id);
   };
 
+  // REAL: slopes in CEDD's LPM works programme — the money already committed by GEO, and a calibration
+  // check for the synthetic score (does the model also rank the slopes GEO judged substandard?)
+  const programmed = useMemo(() => {
+    const rows = slopes
+      .filter((s) => s.works)
+      .map((s) => ({ s, a: assessments.get(s.id) }))
+      .sort((x, y) => (y.a?.score ?? 0) - (x.a?.score ?? 0));
+    const inProgress = rows.filter(({ s }) => s.works!.status === "in-progress").length;
+    const elevatedPlus = rows.filter(({ a }) => a && (a.category === "elevated" || a.category === "high" || a.category === "critical")).length;
+    return { rows, inProgress, elevatedPlus };
+  }, [slopes, assessments]);
+
   return (
     <div className="page">
       <h1>Intervention Portfolio Optimizer</h1>
-      <div className="sub">Where should a fixed mitigation budget go? Move the budget or change the objective — the portfolio updates instantly. Mock optimization on synthetic data.</div>
+      <div className="sub">Where should a fixed mitigation budget go? Move the budget or change the objective — the portfolio updates instantly. Mock optimization on a synthetic risk score; population from the 2021 census.</div>
+
+      {programmed.rows.length > 0 && (
+        <div className="card" style={{ maxWidth: 820 }}>
+          <h3>
+            Already programmed by GEO — LPM works
+            <span className="hint badge real">REAL · CEDD LPMitP</span>
+          </h3>
+          <div className="tiles" style={{ gridTemplateColumns: "repeat(3, 1fr)", marginBottom: 10 }}>
+            <div className="tile">
+              <div className="tile-l">Slopes in the programme</div>
+              <div className="tile-v">{programmed.rows.length}<span className="unit">in this inventory</span></div>
+            </div>
+            <div className="tile">
+              <div className="tile-l">Works started</div>
+              <div className="tile-v">{programmed.inProgress}<span className="unit">of {programmed.rows.length}</span></div>
+            </div>
+            <div className="tile">
+              <div className="tile-l">Model agrees (elevated+)</div>
+              <div className="tile-v" style={{ color: programmed.elevatedPlus / programmed.rows.length > 0.5 ? "var(--risk-low)" : "var(--risk-elevated)" }}>
+                {Math.round((programmed.elevatedPlus / programmed.rows.length) * 100)}%<span className="unit">calibration check</span>
+              </div>
+            </div>
+          </div>
+          <table className="data">
+            <thead>
+              <tr><th>Slope</th><th>Contract</th><th>Start → completion</th><th>Status</th><th>Model score</th><th /></tr>
+            </thead>
+            <tbody>
+              {programmed.rows.slice(0, 8).map(({ s, a }) => (
+                <tr key={s.id} style={{ cursor: "pointer" }} onClick={() => openSlope(s.id)} title={s.works!.location}>
+                  <td style={{ fontFamily: "var(--mono)" }}>{s.id}</td>
+                  <td>{s.works!.contract}</td>
+                  <td style={{ fontSize: 11 }}>{s.works!.startLabel} → {s.works!.completionLabel}</td>
+                  <td><span className={`flag ${s.works!.status === "in-progress" ? "real" : "stale"}`}>{s.works!.status}</span></td>
+                  <td>{a ? <span className={`badge ${a.category}`}>{a.score}</span> : "—"}</td>
+                  <td style={{ color: "#7db4ff", fontFamily: "var(--sans)" }}>open →</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="row-hint">
+            {programmed.rows.length > 8 && `Showing 8 of ${programmed.rows.length}. `}
+            These slopes are excluded from the portfolio below — GEO's Landslip Prevention and Mitigation Programme has already committed to them. The calibration figure is the share
+            our synthetic score also places in elevated or above.
+          </div>
+        </div>
+      )}
 
       <div className="card" style={{ maxWidth: 820 }}>
         <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 22, alignItems: "end" }}>

@@ -42,7 +42,10 @@ function Row({ label, value, color, trend }: { label: string; value: string; col
 
 export default function KpiPanel() {
   const kpi = useStore((s) => s.kpi);
+  const weather = useStore((s) => s.weather);
   if (!kpi) return <div className="side" />;
+  const live = weather?.live;
+  const rain24Real = weather ? !weather.rainfallLast24hMm.isSynthetic : false;
 
   return (
     <div className="side">
@@ -72,9 +75,25 @@ export default function KpiPanel() {
       </div>
 
       <div className="panel">
-        <h3>Rainfall</h3>
+        <h3>
+          Rainfall
+          {live ? (
+            <span className="hint badge real" title={`HKO Open Data · ${live.stations} stations · observation ${live.obsTime.slice(11, 16)} HKT`}>
+              live · HKO
+            </span>
+          ) : (
+            <span className="hint badge synth">synthetic</span>
+          )}
+        </h3>
         <div className="tiles" style={{ marginBottom: 0 }}>
-          <Tile label="Last 24 h" value={String(kpi.rainfall24hMm)} unit="mm" color="var(--accent)" trend={kpi.trends.rainfall24hMm} />
+          <Tile
+            label="Last 24 h"
+            value={String(kpi.rainfall24hMm)}
+            unit="mm"
+            color="var(--accent)"
+            trend={kpi.trends.rainfall24hMm}
+            sub={rain24Real ? `HKO · ${live?.hours24 ?? 0}/24 h accumulated` : live ? "24-h total not yet available" : "synthetic baseline"}
+          />
           <Tile label="Next 24 h" value={String(kpi.forecastRainfallMm)} unit="mm" color="var(--accent)" sub="synthetic forecast" />
         </div>
       </div>
@@ -96,7 +115,7 @@ export default function KpiPanel() {
       </div>
 
       <div className="panel" style={{ marginTop: "auto" }}>
-        <div className="section-note">● All values from synthetic providers · trends vs −24 h</div>
+        <div className="section-note">● Risk, sensors, incidents synthetic · rainfall {live ? "live (HKO)" : "synthetic"} · population census 2021 · trends vs −24 h</div>
       </div>
     </div>
   );

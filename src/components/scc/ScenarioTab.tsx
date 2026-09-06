@@ -207,6 +207,12 @@ function ResultPanel({ slope, assessment }: { slope: Slope; assessment: RiskAsse
     if (!animPlaying || !result) return;
     let last = performance.now();
     const loop = (now: number) => {
+      // Updating Zustand and rebuilding map GeoJSON at display refresh rate
+      // competes with camera rendering. 20 Hz is sufficient for the model frames.
+      if (now - last < 50) {
+        rafRef.current = requestAnimationFrame(loop);
+        return;
+      }
       const dt = ((now - last) / 1000) * animSpeed;
       last = now;
       const st = useStore.getState();

@@ -10,9 +10,12 @@ import type { StyleSpecification, LayerSpecification } from "maplibre-gl";
 import { useStore, BasemapId } from "@/state/store";
 import { registry } from "@/core/registry";
 import { HK_CENTER } from "@/mock/geo";
-import { RISK_COLORS, Slope, RiskAssessment, Asset, Incident } from "@/core/types";
+import { RISK_COLORS, Slope, RiskAssessment, RiskCategory, Asset, Incident } from "@/core/types";
 import { offsetM } from "@/mock/geo";
-import { fetchSlopesInBbox, fetchBlackspots, fetchLandslides } from "@/live/csdi";
+import { fetchSlopesInBbox, fetchBlackspots, fetchLandslides, fetchLpmWorks, fetchEntliInBbox, fetchRoadsInBbox } from "@/live/csdi";
+import type { LiveRain } from "@/live/hko";
+import { setMapInteracting, yieldForMap } from "@/core/schedule";
+import { slopeCamera } from "@/core/mapSelection";
 
 const DARK_STYLE_URL = "https://tiles.openfreemap.org/styles/dark";
 const LIGHT_STYLE_URL = "https://tiles.openfreemap.org/styles/positron";
@@ -51,13 +54,16 @@ const DEM_TILES = ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/
 
 /** Layers that belong to the twin (kept across basemap switches). */
 const OWN_SOURCE_IDS = [
-  "dem", "hillshadeDem", "slopes", "slopes-pts", "roads", "buildings", "drainage", "incidents", "sensors", "mitigated", "historical", "rainfall-pts", "flood",
+  "dem", "slopes", "slopes-blobs", "slopes-pts", "roads", "buildings", "drainage", "incidents", "sensors", "mitigated", "historical", "rainfall-pts", "flood",
   "runout", "runout-front", "selected", "csdi-slopes", "csdi-blackspots", "csdi-landslides",
+  "csdi-lpm", "csdi-lpm-pts", "entli-grid", "csdi-entli-crowns", "csdi-entli-trails", "live-rain", "csdi-roads", "facilities-local", "building-blocks",
 ];
 const OWN_LAYER_IDS = [
-  "flood-fill", "flood-line", "rain-heat", "csdi-slopes-fill", "csdi-slopes-line", "slopes-pt", "slopes-fill", "slopes-line", "uncertainty-fill", "roads-line",
-  "buildings-pt", "drainage-pt", "mitigated-pt", "historical-pt", "sensors-pt", "incidents-pt", "csdi-landslides-pt", "csdi-blackspots-pt",
-  "selected-line", "runout-fill", "runout-line", "runout-front-pt",
+  "flood-fill", "flood-line", "rain-heat", "entli-grid-fill", "csdi-slopes-fill", "csdi-slopes-line", "csdi-lpm-fill", "csdi-lpm-line",
+  "slopes-blobs-fill", "slopes-pt", "slopes-fill", "slopes-line", "uncertainty-fill", "csdi-roads-line", "roads-line",
+  "building-blocks-pt", "facilities-local-pt", "buildings-pt", "drainage-pt", "mitigated-pt", "historical-pt", "sensors-pt", "incidents-pt", "csdi-landslides-pt", "csdi-blackspots-pt",
+  "csdi-lpm-pt", "csdi-entli-trails-line", "csdi-entli-crowns-pt", "live-rain-pt",
+  "runout-fill", "runout-line", "runout-front-pt", "selected-fill", "selected-halo", "selected-line",
 ];
 
 /** Terrain relief tuned per basemap: soft grey shadows on the light map, deep shadows on dark/satellite. */
@@ -66,7 +72,8 @@ function hillshadeFor(b: BasemapId): LayerSpecification {
   return {
     id: "hillshade",
     type: "hillshade",
-    source: "hillshadeDem",
+    source: "dem",
+    maxzoom: 14, // relief shading is invisible under buildings and costs a full pass per frame
     paint: light
       ? { "hillshade-exaggeration": 0.38, "hillshade-shadow-color": "#5d6878", "hillshade-highlight-color": "#ffffff", "hillshade-accent-color": "#c9d0da" }
       : { "hillshade-exaggeration": 0.55, "hillshade-shadow-color": "#05070b", "hillshade-highlight-color": "#6b7f9c", "hillshade-accent-color": "#1c2634" },
@@ -81,14 +88,14 @@ function buildings3dFor(b: BasemapId): LayerSpecification {
     type: "fill-extrusion",
     source: "openmaptiles",
     "source-layer": "building",
-    minzoom: 13,
+    minzoom: 14,
     paint: {
       "fill-extrusion-color": light
         ? ["interpolate", ["linear"], ["coalesce", ["get", "render_height"], 12], 0, "#dfe3ea", 60, "#c6cdd8", 200, "#aab4c4"]
         : ["interpolate", ["linear"], ["coalesce", ["get", "render_height"], 12], 0, "#232b38", 60, "#34405a", 200, "#4a5a80"],
       "fill-extrusion-height": ["coalesce", ["get", "render_height"], 12],
       "fill-extrusion-base": ["coalesce", ["get", "render_min_height"], 0],
-      "fill-extrusion-opacity": light ? 0.85 : 0.78,
+      "fill-extrusion-opacity": 1, // opaque: translucent extrusions cost a second pass on every frame
     },
   };
 }
@@ -114,32 +121,132 @@ function tuneStyle(b: BasemapId, style: StyleSpecification): StyleSpecification 
   return { ...style, layers };
 }
 
-function slopeFC(slopes: Slope[], assessments: Map<string, RiskAssessment>, stormMode: boolean, stormHorizonH: number, gameTime: number): any {
+/**
+ * Static slope geometry + registration properties, uploaded to the map once. Risk colour, score and
+ * confidence live in feature-state (applyRiskState) so a refresh touches only the slopes whose band
+ * changed instead of re-uploading ~2 MB of GeoJSON.
+ */
+function slopeFC(slopes: Slope[]): any {
   return {
     type: "FeatureCollection",
-    features: slopes.map((s) => {
-      let a = assessments.get(s.id);
-      if (stormMode && a && s.hasData) {
-        a = registry.risk.projectUnderStorm(s, gameTime, stormHorizonH);
-      }
-      const cat = a?.category ?? "no-data";
-      return {
-        type: "Feature",
-        geometry: { type: "Polygon", coordinates: [s.polygon] },
-        properties: {
-          id: s.id,
-          cat,
-          color: RISK_COLORS[cat],
-          score: a?.score ?? 0,
-          conf: a?.confidence ?? 0,
-          district: s.district,
-          hasMit: s.mitigations.length > 0 ? 1 : 0,
-          hasHist: s.history.some((e) => e.kind === "incident") ? 1 : 0,
-          rain: a ? 1 : 0,
-        },
-      };
-    }),
+    features: slopes.map((s) => ({
+      type: "Feature",
+      id: s.id,
+      geometry: { type: "Polygon", coordinates: [s.polygon] },
+      properties: {
+        id: s.id,
+        district: s.district,
+        hasMit: s.mitigations.length > 0 ? 1 : 0,
+        hasHist: s.history.some((e) => e.kind === "incident") ? 1 : 0,
+      },
+    })),
   };
+}
+
+// ---------- territory-zoom risk surface: soft patches per slope cluster, draped on the terrain ----------
+// Registered slopes are 20–100 m features — invisible from a territory view. Below zoom 12.5 the map shows
+// the worst risk band of each ~280 m cell as two overlapping octagons (an outer faint ring and an inner
+// stronger one) so clusters merge into organic coloured hillsides instead of a field of dots.
+const BLOB_LON = 0.0027, BLOB_LAT = 0.0025; // ≈ 280 m cells
+const slopeCell = new Map<string, string>(); // slope id -> cell key
+const cellSlopes = new Map<string, string[]>(); // cell key -> slope ids
+const cellSig = new Map<string, string>();
+const CAT_RANK: Record<RiskCategory, number> = { critical: 5, high: 4, elevated: 3, moderate: 2, low: 1, "no-data": 0 };
+
+function octagon(c: [number, number], rM: number): [number, number][] {
+  const kx = rM / (111_320 * Math.cos((c[1] * Math.PI) / 180)), ky = rM / 111_320;
+  const ring: [number, number][] = [];
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2 + Math.PI / 8;
+    ring.push([c[0] + Math.cos(a) * kx, c[1] + Math.sin(a) * ky]);
+  }
+  ring.push(ring[0]);
+  return ring;
+}
+
+function riskBlobFC(slopes: Slope[]): any {
+  slopeCell.clear();
+  cellSlopes.clear();
+  const sum = new Map<string, [number, number]>();
+  for (const s of slopes) {
+    const key = `${Math.floor(s.centroid[0] / BLOB_LON)}:${Math.floor(s.centroid[1] / BLOB_LAT)}`;
+    slopeCell.set(s.id, key);
+    (cellSlopes.get(key) ?? cellSlopes.set(key, []).get(key)!).push(s.id);
+    const a = sum.get(key) ?? [0, 0];
+    a[0] += s.centroid[0]; a[1] += s.centroid[1];
+    sum.set(key, a);
+  }
+  const features: any[] = [];
+  for (const [key, ids] of cellSlopes) {
+    const a = sum.get(key)!;
+    const c: [number, number] = [a[0] / ids.length, a[1] / ids.length];
+    const n = ids.length;
+    // bigger clusters get slightly bigger patches; rings overlap with the neighbours so hillsides read as one surface
+    const rOuter = 240 + Math.min(120, n * 12), rInner = 150 + Math.min(70, n * 7);
+    features.push({ type: "Feature", id: `${key}|o`, geometry: { type: "Polygon", coordinates: [octagon(c, rOuter)] }, properties: { id: `${key}|o`, cell: key, ring: "o", n } });
+    features.push({ type: "Feature", id: `${key}|i`, geometry: { type: "Polygon", coordinates: [octagon(c, rInner)] }, properties: { id: `${key}|i`, cell: key, ring: "i", n } });
+  }
+  return { type: "FeatureCollection", features };
+}
+
+/** After per-slope state is known, colour each cell by its worst visible band. */
+function applyBlobState(map: maplibregl.Map, force = false) {
+  if (!map.getSource("slopes-blobs")) return;
+  if (force) cellSig.clear();
+  for (const [key, ids] of cellSlopes) {
+    let worst: RiskCategory = "no-data";
+    let any = false;
+    for (const id of ids) {
+      const cat = riskCat.get(id);
+      if (!cat || hiddenCats.has(cat)) continue;
+      any = true;
+      if (CAT_RANK[cat] > CAT_RANK[worst]) worst = cat;
+    }
+    const sig = any ? worst : "-";
+    if (cellSig.get(key) === sig) continue;
+    cellSig.set(key, sig);
+    const state = { color: RISK_COLORS[worst], hidden: !any };
+    map.setFeatureState({ source: "slopes-blobs", id: `${key}|o` }, state);
+    map.setFeatureState({ source: "slopes-blobs", id: `${key}|i` }, state);
+  }
+}
+
+// last applied risk state per slope ("cat|score|conf") and the category behind the legend filter
+const riskSig = new Map<string, string>();
+const riskCat = new Map<string, RiskCategory>();
+let hiddenCats = new Set<string>();
+
+/** Push risk colours into feature-state for the slopes whose assessment changed (all of them when `force`). */
+const riskPasses = new WeakMap<maplibregl.Map, number>();
+async function applyRiskState(map: maplibregl.Map, slopes: Slope[], assessments: Map<string, RiskAssessment>, stormMode: boolean, stormHorizonH: number, gameTime: number, force = false) {
+  if (!map.getSource("slopes")) return;
+  const pass = (riskPasses.get(map) ?? 0) + 1;
+  riskPasses.set(map, pass);
+  if (force) riskSig.clear();
+  for (let i = 0; i < slopes.length; i++) {
+    if (i % 64 === 0) {
+      await yieldForMap();
+      if (riskPasses.get(map) !== pass) return;
+    }
+    const s = slopes[i];
+    const a = assessments.get(s.id);
+    let score = a?.score ?? 0;
+    let cat: RiskCategory = a?.category ?? "no-data";
+    if (stormMode && a && s.hasData) {
+      const p = registry.risk.projectScore(s, gameTime, stormHorizonH);
+      score = p.score;
+      cat = p.category;
+    }
+    const conf = a?.confidence ?? 0;
+    const sig = `${cat}|${score}|${conf.toFixed(2)}`;
+    if (riskSig.get(s.id) === sig) continue;
+    riskSig.set(s.id, sig);
+    riskCat.set(s.id, cat);
+    const state = { cat, color: RISK_COLORS[cat], score, conf, hidden: hiddenCats.has(cat) };
+    map.setFeatureState({ source: "slopes", id: s.id }, state);
+    map.setFeatureState({ source: "slopes-pts", id: s.id }, state);
+  }
+  applyBlobState(map, force);
 }
 
 function centroidFC(slopes: Slope[], filter: (s: Slope) => boolean, props: (s: Slope) => any = () => ({})): any {
@@ -161,7 +268,7 @@ function assetFC(assets: Asset[], kinds: string[]): any {
       .map((a) => ({
         type: "Feature",
         geometry: a.line ? { type: "LineString", coordinates: a.line } : { type: "Point", coordinates: a.location },
-        properties: { id: a.id, kind: a.kind, name: a.name },
+        properties: { id: a.id, kind: a.kind, name: a.name, sub: a.sub ?? "", real: a.real ? 1 : 0, height: a.heightM ?? 0 },
       })),
   };
 }
@@ -178,6 +285,35 @@ function incidentFC(incidents: Incident[]): any {
 }
 
 const EMPTY_FC: any = { type: "FeatureCollection", features: [] };
+
+/** HKO rain-gauge stations with their latest past-hour reading (REAL). */
+function liveRainFC(live: LiveRain | null): any {
+  if (!live) return EMPTY_FC;
+  return {
+    type: "FeatureCollection",
+    features: live.stations.map((st) => ({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [st.lon, st.lat] },
+      properties: { id: st.id, name: st.name, mmHr: st.mmHr, mm24: st.mm24 ?? -1, hoursCounted: st.hoursCounted ?? 0, obsTime: live.obsTime },
+    })),
+  };
+}
+
+/** Centroid points of a polygon collection (low-zoom representation of small polygons). */
+function polygonCentroidFC(fc: any): any {
+  return {
+    type: "FeatureCollection",
+    features: fc.features
+      .map((f: any) => {
+        const ring: number[][] | undefined = f.geometry?.type === "Polygon" ? f.geometry.coordinates[0] : f.geometry?.type === "MultiPolygon" ? f.geometry.coordinates[0]?.[0] : undefined;
+        if (!ring?.length) return null;
+        let x = 0, y = 0;
+        for (const v of ring) { x += v[0]; y += v[1]; }
+        return { type: "Feature", geometry: { type: "Point", coordinates: [x / ring.length, y / ring.length] }, properties: f.properties };
+      })
+      .filter(Boolean),
+  };
+}
 
 /** Centroid version of the slope collection, carrying the same colour/category properties. */
 function slopePointFC(polyFC: any, slopes: Slope[]): any {
@@ -197,18 +333,26 @@ function mountOwnLayers(map: maplibregl.Map) {
   const st = useStore.getState();
 
   map.addSource("dem", { type: "raster-dem", tiles: DEM_TILES, encoding: "terrarium", tileSize: 256, maxzoom: 13 });
-  map.addSource("hillshadeDem", { type: "raster-dem", tiles: DEM_TILES, encoding: "terrarium", tileSize: 256, maxzoom: 13 });
-  map.setTerrain({ source: "dem", exaggeration: 1.5 });
+  if (st.map3d) map.setTerrain({ source: "dem", exaggeration: 1.5 });
 
   // basemap-relative anchors: relief and 3D buildings sit under labels
   const firstSymbol = map.getStyle().layers.find((l) => l.type === "symbol")?.id;
   map.addLayer(hillshadeFor(st.basemap), firstSymbol);
   if (map.getSource("openmaptiles")) map.addLayer(buildings3dFor(st.basemap), firstSymbol);
+  setBasemapBuildingFills(map, !st.map3d);
+  applyMapMode(map, st.map3d);
 
-  map.addSource("slopes", { type: "geojson", data: slopeFC(st.slopes, st.assessments, st.stormMode, st.stormHorizonH, st.gameTime) });
-  map.addSource("slopes-pts", { type: "geojson", data: slopePointFC(slopeFC(st.slopes, st.assessments, st.stormMode, st.stormHorizonH, st.gameTime), st.slopes) });
-  map.addSource("roads", { type: "geojson", data: assetFC(st.assets, ["road", "emergency-route"]) });
-  map.addSource("buildings", { type: "geojson", data: assetFC(st.assets, ["building", "hospital", "school", "railway"]) });
+  const slopesFc = slopeFC(st.slopes);
+  map.addSource("slopes", { type: "geojson", promoteId: "id", data: slopesFc });
+  map.addSource("slopes-pts", { type: "geojson", promoteId: "id", data: slopePointFC(slopesFc, st.slopes) });
+  map.addSource("slopes-blobs", { type: "geojson", promoteId: "id", data: riskBlobFC(st.slopes) });
+  // real road centrelines come from LandsD per viewport (csdi-roads); the asset table only keeps each slope's nearest road
+  map.addSource("roads", { type: "geojson", data: assetFC(st.assets, ["emergency-route"]) });
+  map.addSource("csdi-roads", { type: "geojson", data: EMPTY_FC });
+  // exposure points in three sources so MapLibre only loads/draws each class from its own zoom
+  map.addSource("buildings", { type: "geojson", data: assetFC(st.assets, ["hospital", "fire-station", "police", "railway"]) });
+  map.addSource("facilities-local", { type: "geojson", data: assetFC(st.assets, ["school", "kindergarten", "clinic"]) });
+  map.addSource("building-blocks", { type: "geojson", data: assetFC(st.assets, ["building"]) });
   map.addSource("drainage", { type: "geojson", data: assetFC(st.assets, ["drainage", "utility"]) });
   map.addSource("incidents", { type: "geojson", data: incidentFC(st.incidents) });
   map.addSource("sensors", { type: "geojson", data: centroidFC(st.slopes, (s) => s.sensors.length > 0, (s) => ({ n: s.sensors.length })) });
@@ -247,9 +391,24 @@ function mountOwnLayers(map: maplibregl.Map) {
   map.addSource("csdi-slopes", { type: "geojson", data: EMPTY_FC });
   map.addSource("csdi-blackspots", { type: "geojson", data: EMPTY_FC });
   map.addSource("csdi-landslides", { type: "geojson", data: EMPTY_FC });
+  map.addSource("csdi-lpm", { type: "geojson", data: EMPTY_FC });
+  map.addSource("csdi-lpm-pts", { type: "geojson", data: EMPTY_FC });
+  map.addSource("entli-grid", { type: "geojson", data: EMPTY_FC });
+  map.addSource("csdi-entli-crowns", { type: "geojson", data: EMPTY_FC });
+  map.addSource("csdi-entli-trails", { type: "geojson", data: EMPTY_FC });
+  map.addSource("live-rain", { type: "geojson", data: liveRainFC(st.liveRain) });
 
   map.addLayer({ id: "flood-fill", type: "fill", source: "flood", layout: { visibility: "none" }, paint: { "fill-color": "#2470c2", "fill-opacity": 0.22 } });
   map.addLayer({ id: "flood-line", type: "line", source: "flood", layout: { visibility: "none" }, paint: { "line-color": "#3d8bfd", "line-opacity": 0.5, "line-dasharray": [2, 2] } });
+
+  // ENTLI landslide density (baked 250 m grid) — territory-wide picture far out; live crowns take over at zoom 12
+  map.addLayer({
+    id: "entli-grid-fill", type: "fill", source: "entli-grid", layout: { visibility: "none" }, maxzoom: 13.5,
+    paint: {
+      "fill-color": ["interpolate", ["linear"], ["get", "d"], 1, "#f7dcc3", 4, "#f2a25f", 12, "#df5a2b", 30, "#8e1d12"],
+      "fill-opacity": ["interpolate", ["linear"], ["zoom"], 9, 0.6, 13.5, 0.15],
+    },
+  });
 
   // CEDD registered man-made slopes — real catalogue polygons, drawn under the synthetic risk layers
   map.addLayer({
@@ -259,6 +418,17 @@ function mountOwnLayers(map: maplibregl.Map) {
   map.addLayer({
     id: "csdi-slopes-line", type: "line", source: "csdi-slopes", layout: { visibility: "none" },
     paint: { "line-color": "#18b8a6", "line-opacity": 0.8, "line-width": ["interpolate", ["linear"], ["zoom"], 12, 0.6, 16, 1.6] },
+  });
+
+  // CEDD LPMitP works programme — real polygons of slopes (amber) and hillside catchments (gold) under upgrading contracts
+  const lpmColor: any = ["match", ["get", "kind"], "catchment", "#c9a227", "#e8862e"];
+  map.addLayer({
+    id: "csdi-lpm-fill", type: "fill", source: "csdi-lpm", layout: { visibility: "none" },
+    paint: { "fill-color": lpmColor, "fill-opacity": 0.35 },
+  });
+  map.addLayer({
+    id: "csdi-lpm-line", type: "line", source: "csdi-lpm", layout: { visibility: "none" },
+    paint: { "line-color": lpmColor, "line-width": ["interpolate", ["linear"], ["zoom"], 10, 1, 15, 2.2], "line-opacity": 0.95 },
   });
 
   map.addLayer({
@@ -272,44 +442,75 @@ function mountOwnLayers(map: maplibregl.Map) {
     },
   });
 
-  // Far out, individual slope features are sub-pixel: show them as risk-coloured points until
-  // zoom 12.5, then hand over to the true polygons (which are drawn from zoom 11.5 so the two cross-fade).
+  // Risk colour/score/confidence come from feature-state; `hidden` implements the legend filter.
+  const stateColor: any = ["coalesce", ["feature-state", "color"], RISK_COLORS["no-data"]];
+  const shown: any = ["case", ["boolean", ["feature-state", "hidden"], false], 0, 1];
+  // Far out, individual slope features are sub-pixel: show the risk surface (soft patches per cluster, draped on the
+  // terrain) until zoom 12.5, then hand over to the true polygons (drawn from zoom 11.5 so the two cross-fade).
+  map.addLayer({
+    id: "slopes-blobs-fill", type: "fill", source: "slopes-blobs", maxzoom: 12.5,
+    paint: {
+      "fill-color": stateColor,
+      "fill-antialias": false,
+      "fill-opacity": ["interpolate", ["linear"], ["zoom"], 8, ["*", shown, ["match", ["get", "ring"], "o", 0.3, 0.62]], 11.5, ["*", shown, ["match", ["get", "ring"], "o", 0.3, 0.62]], 12.5, 0],
+    },
+  });
+  // invisible hit targets so a click on a cluster still opens its most at-risk slope
   map.addLayer({
     id: "slopes-pt", type: "circle", source: "slopes-pts", maxzoom: 12.5,
-    paint: {
-      "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 2.6, 11, 4, 12.5, 6],
-      "circle-color": ["get", "color"],
-      "circle-opacity": ["interpolate", ["linear"], ["zoom"], 11.5, 0.9, 12.5, 0],
-      "circle-stroke-width": 0.6, "circle-stroke-color": "rgba(0,0,0,0.35)",
-    },
+    paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 5, 12.5, 8], "circle-opacity": 0, "circle-stroke-width": 0 },
   });
   map.addLayer({
     id: "slopes-fill", type: "fill", source: "slopes", minzoom: 11.5,
-    paint: { "fill-color": ["get", "color"], "fill-opacity": ["interpolate", ["linear"], ["zoom"], 11.5, 0.2, 12.5, 0.62, 15, 0.5] },
+    paint: { "fill-color": stateColor, "fill-opacity": ["interpolate", ["linear"], ["zoom"], 11.5, ["*", shown, 0.2], 12.5, ["*", shown, 0.62], 15, ["*", shown, 0.5]] },
   });
   map.addLayer({
     id: "slopes-line", type: "line", source: "slopes", minzoom: 11.5,
-    paint: { "line-color": ["get", "color"], "line-width": ["interpolate", ["linear"], ["zoom"], 12, 0.8, 15, 1.8], "line-opacity": 0.95 },
+    paint: { "line-color": stateColor, "line-width": ["interpolate", ["linear"], ["zoom"], 12, 0.8, 15, 1.8], "line-opacity": ["*", shown, 0.95] },
   });
   map.addLayer({
     id: "uncertainty-fill", type: "fill", source: "slopes", layout: { visibility: "none" },
     paint: {
-      "fill-color": ["interpolate", ["linear"], ["get", "conf"], 0.2, "rgba(186,85,255,0.75)", 0.55, "rgba(186,85,255,0.35)", 0.9, "rgba(186,85,255,0.04)"],
+      "fill-color": ["interpolate", ["linear"], ["coalesce", ["feature-state", "conf"], 0.9], 0.2, "rgba(186,85,255,0.75)", 0.55, "rgba(186,85,255,0.35)", 0.9, "rgba(186,85,255,0.04)"],
+      "fill-opacity": shown,
     },
   });
 
+  // LandsD road centrelines (live, zoom ≥ 13): width by street class
+  map.addLayer({
+    id: "csdi-roads-line", type: "line", source: "csdi-roads", minzoom: 13,
+    paint: {
+      "line-color": ["match", ["get", "STREETTYPE"], "Expressway", "#ff9f0a", "Trunk Road", "#ffb84d", "Primary Road", "#6ea8ff", "#5b7ea8"],
+      "line-width": ["match", ["get", "STREETTYPE"], "Expressway", 3, "Trunk Road", 2.4, "Primary Road", 2, 1.3],
+      "line-opacity": 0.8,
+    },
+  }, "slopes-pt");
   map.addLayer({
     id: "roads-line", type: "line", source: "roads",
     paint: { "line-color": "#5b7ea8", "line-width": 1.6, "line-opacity": 0.75 },
-  });
+  }, "slopes-pt");
   map.addLayer({
-    id: "buildings-pt", type: "circle", source: "buildings",
+    id: "buildings-pt", type: "circle", source: "buildings", minzoom: 12,
     paint: {
-      "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, ["match", ["get", "kind"], "hospital", 3.5, "school", 2.5, 1.8], 14, ["match", ["get", "kind"], "hospital", 7, "school", 5.5, 4]],
-      "circle-color": ["match", ["get", "kind"], "hospital", "#e56db1", "school", "#7db4ff", "railway", "#9a86e8", "#8fa2ba"],
-      "circle-opacity": 0.85, "circle-stroke-width": 1, "circle-stroke-color": "#0c1017",
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, ["match", ["get", "kind"], "hospital", 3.5, "fire-station", 3.2, "police", 3, "school", 2.5, "clinic", 2.2, 1.8], 14, ["match", ["get", "kind"], "hospital", 7, "fire-station", 6.5, "police", 6, "school", 5.5, "clinic", 5, 4]],
+      "circle-color": ["match", ["get", "kind"], "hospital", "#e56db1", "fire-station", "#ff6b3d", "police", "#b9a9f5", "railway", "#9a86e8", "#8fa2ba"],
+      "circle-opacity": 0.9, "circle-stroke-width": 1, "circle-stroke-color": "#0c1017",
     },
-  });
+  }, "slopes-pt"); // beneath the slope layers: exposure context, not the subject
+  // schools / kindergartens / clinics from zoom 12, LandsD building blocks from zoom 13 — separate sources, so nothing is
+  // uploaded or drawn below those zooms (the 16k points would otherwise cost every 3D frame)
+  map.addLayer({
+    id: "facilities-local-pt", type: "circle", source: "facilities-local", minzoom: 12,
+    paint: {
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 12, ["match", ["get", "kind"], "school", 2.5, "clinic", 2.2, 1.8], 14, ["match", ["get", "kind"], "school", 5.5, "clinic", 5, 4]],
+      "circle-color": ["match", ["get", "kind"], "school", "#7db4ff", "kindergarten", "#9ec5ff", "#66d4cf"],
+      "circle-opacity": 0.9, "circle-stroke-width": 1, "circle-stroke-color": "#0c1017",
+    },
+  }, "slopes-pt");
+  map.addLayer({
+    id: "building-blocks-pt", type: "circle", source: "building-blocks", minzoom: 13,
+    paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 2, 16, 4.5], "circle-color": "#8fa2ba", "circle-opacity": 0.85, "circle-stroke-width": 1, "circle-stroke-color": "#0c1017" },
+  }, "slopes-pt");
   map.addLayer({
     id: "drainage-pt", type: "circle", source: "drainage", layout: { visibility: "none" },
     paint: { "circle-radius": 3.5, "circle-color": "#38b6d8", "circle-opacity": 0.85 },
@@ -353,10 +554,31 @@ function mountOwnLayers(map: maplibregl.Map) {
     },
   });
 
+  // LPM works as points far out (the polygons are sub-pixel below zoom ~13)
   map.addLayer({
-    id: "selected-line", type: "line", source: "selected",
-    paint: { "line-color": "#ffffff", "line-width": 2.5 },
+    id: "csdi-lpm-pt", type: "circle", source: "csdi-lpm-pts", layout: { visibility: "none" }, maxzoom: 13,
+    paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 3, 13, 6], "circle-color": lpmColor, "circle-opacity": 0.9, "circle-stroke-width": 1, "circle-stroke-color": "#3a2408" },
   });
+  // ENTLI runout trails and crowns (live, viewport-scoped, zoom ≥ 12): rust = dated recent, tan = relict
+  const entliColor: any = ["match", ["get", "SLIDE_TYPE"], "R", "#b08968", "#df5a2b"];
+  map.addLayer({
+    id: "csdi-entli-trails-line", type: "line", source: "csdi-entli-trails", layout: { visibility: "none" },
+    paint: { "line-color": entliColor, "line-width": ["interpolate", ["linear"], ["zoom"], 13, 0.8, 16, 2], "line-opacity": 0.8 },
+  });
+  map.addLayer({
+    id: "csdi-entli-crowns-pt", type: "circle", source: "csdi-entli-crowns", layout: { visibility: "none" },
+    paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 13, 2, 16, 4.5], "circle-color": entliColor, "circle-opacity": 0.85, "circle-stroke-width": 0.6, "circle-stroke-color": "#2b1a10" },
+  });
+  // HKO rain-gauge stations: radius and colour follow the past-hour reading
+  map.addLayer({
+    id: "live-rain-pt", type: "circle", source: "live-rain", layout: { visibility: "none" },
+    paint: {
+      "circle-radius": ["interpolate", ["linear"], ["get", "mmHr"], 0, 5, 10, 10, 40, 18, 100, 26],
+      "circle-color": ["interpolate", ["linear"], ["get", "mmHr"], 0, "#9ec5ff", 10, "#3d8bfd", 30, "#1d4fd6", 70, "#4b0fa8"],
+      "circle-opacity": 0.55, "circle-stroke-width": 1.5, "circle-stroke-color": "#dbe9ff",
+    },
+  });
+
   map.addLayer({
     id: "runout-fill", type: "fill", source: "runout",
     paint: { "fill-color": "#a0522d", "fill-opacity": 0.6 },
@@ -369,6 +591,70 @@ function mountOwnLayers(map: maplibregl.Map) {
     id: "runout-front-pt", type: "circle", source: "runout-front",
     paint: { "circle-radius": 7, "circle-color": "#ff5a2a", "circle-blur": 0.4, "circle-stroke-width": 2, "circle-stroke-color": "#ffd76b" },
   });
+
+  // Selection stays visible even when risk layers/classes are switched off.
+  map.addLayer({ id: "selected-fill", type: "fill", source: "selected", paint: { "fill-color": "#00d9ff", "fill-opacity": 0.28 } });
+  map.addLayer({ id: "selected-halo", type: "line", source: "selected", paint: { "line-color": "#072333", "line-width": 7 } });
+  map.addLayer({ id: "selected-line", type: "line", source: "selected", paint: { "line-color": "#5cecff", "line-width": 3 } });
+  void applyRiskState(map, st.slopes, st.assessments, st.stormMode, st.stormHorizonH, st.gameTime, true);
+}
+
+function showSelection(map: maplibregl.Map, slope: Slope | undefined) {
+  const src = map.getSource("selected") as maplibregl.GeoJSONSource | undefined;
+  src?.setData(slope ? {
+    type: "FeatureCollection",
+    features: [{ type: "Feature", geometry: { type: "Polygon", coordinates: [slope.polygon] }, properties: { id: slope.id } }],
+  } : EMPTY_FC);
+}
+
+/** Fit actual geometry in the map's own viewport; the inspector has its own layout space. */
+function focusSlope(map: maplibregl.Map, slope: Slope, duration = 550) {
+  map.resize();
+  const { bounds, options } = slopeCamera(slope, map.getContainer().clientWidth, map.getContainer().clientHeight);
+  map.fitBounds(bounds, { ...options, pitch: useStore.getState().map3d ? 40 : 0, duration });
+}
+
+/** The vector basemap's flat building fills are redundant (and a draw pass) under our 3D extrusions. */
+function setBasemapBuildingFills(map: maplibregl.Map, visible: boolean) {
+  for (const l of map.getStyle()?.layers ?? []) {
+    if (l.id === "buildings-3d") continue;
+    if ((l as any)["source-layer"] === "building" && map.getLayer(l.id)) map.setLayoutProperty(l.id, "visibility", visible ? "visible" : "none");
+  }
+}
+
+function applyMapMode(map: maplibregl.Map, enabled: boolean) {
+  setBasemapBuildingFills(map, !enabled);
+  map.setPixelRatio(1); // integrated GPUs: 3D terrain at 1× is the difference between 30 and 55 fps
+  (map as any).__terrainSuspended = false;
+  map.setTerrain(enabled ? { source: "dem", exaggeration: 1.5 } : null);
+  if (map.getLayer("hillshade")) map.setLayoutProperty("hillshade", "visibility", enabled ? "visible" : "none");
+  if (map.getLayer("buildings-3d")) map.setLayoutProperty("buildings-3d", "visibility", enabled && useStore.getState().layers.buildings ? "visible" : "none");
+}
+
+/**
+ * Terrain drapes the *whole* style (90+ layers across basemap + twin overlays) through an extra
+ * render-to-texture pass every frame — the single biggest 3D cost, and one that buys nothing while
+ * the camera is mid-drag (the user is looking at motion blur, not hillside relief). Drop it for the
+ * duration of a user-driven pan/zoom/rotate and restore it the instant the camera settles. Only
+ * user gestures (`e.originalEvent` set) trigger this — a programmatic flyTo (e.g. jumping to a
+ * selected slope) keeps full terrain quality throughout since those moves are short and the terrain
+ * is the point of the shot.
+ */
+function suspendTerrainForMove(map: maplibregl.Map, suspend: boolean) {
+  if (!useStore.getState().map3d) return;
+  // deferred to next frame: mutating terrain synchronously inside the movestart/moveend dispatch
+  // corrupts maplibre's internal handler state (same class of bug as changing pixelRatio on movestart —
+  // the drag simply stops responding afterwards)
+  if (suspend) {
+    if (!map.getTerrain() || (map as any).__terrainSuspended) return;
+    (map as any).__terrainSuspended = true;
+    requestAnimationFrame(() => {
+      if ((map as any).__terrainSuspended) map.setTerrain(null);
+    });
+  } else if ((map as any).__terrainSuspended) {
+    (map as any).__terrainSuspended = false;
+    requestAnimationFrame(() => map.setTerrain({ source: "dem", exaggeration: 1.5 }));
+  }
 }
 
 export default function MapView() {
@@ -376,6 +662,8 @@ export default function MapView() {
   const containerRef = useRef<HTMLDivElement>(null);
   const loadedRef = useRef(false);
   const popupRef = useRef<maplibregl.Popup | null>(null);
+  const selectionMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const lastRunoutRef = useRef<{ result: typeof simResult; frame: number } | null>(null);
   const basemapRef = useRef<BasemapId>(useStore.getState().basemap);
 
   const slopes = useStore((s) => s.slopes);
@@ -393,6 +681,9 @@ export default function MapView() {
   const riskFilter = useStore((s) => s.riskFilter);
   const viewCmd = useStore((s) => s.viewCmd);
   const basemap = useStore((s) => s.basemap);
+  const liveRain = useStore((s) => s.liveRain);
+  const mapLoaded = useStore((s) => s.mapLoaded);
+  const map3d = useStore((s) => s.map3d);
 
   // ---- init map ----
   useEffect(() => {
@@ -400,6 +691,13 @@ export default function MapView() {
     const container = containerRef.current;
     const initial = useStore.getState().basemap;
     let cancelled = false;
+    let viewportTimer: ReturnType<typeof setTimeout> | undefined;
+    let resizeFrame = 0;
+    const resizeObserver = new ResizeObserver(() => {
+      cancelAnimationFrame(resizeFrame);
+      resizeFrame = requestAnimationFrame(() => mapRef.current?.resize());
+    });
+    resizeObserver.observe(container);
 
     // The dark basemap is tuned (navy water, dimmer labels) before the map is created,
     // so fetch its style JSON first; satellite is a local style object.
@@ -413,26 +711,51 @@ export default function MapView() {
 
     void initialStyle.then((style) => {
       if (cancelled || mapRef.current) return;
+      // first view: close on Central / Mid-Levels — the CBD with the registered slopes on the hillside behind it
       const map = new maplibregl.Map({
         container,
         style,
-        center: HK_CENTER,
-        zoom: 10.4,
-        pitch: 52,
-        bearing: -12,
-        maxPitch: 72,
-        attributionControl: { compact: true },
+        center: [114.158, 22.28],
+        zoom: 14.6,
+        pitch: useStore.getState().map3d ? 56 : 0,
+        bearing: -24,
+        maxPitch: 62, // beyond this the horizon pulls in far more terrain-draped tiles than the view is worth
+        maxZoom: 17.5, // beyond this the camera dips under the exaggerated terrain and the frame goes black
+        pixelRatio: 1,
+        renderWorldCopies: false,
+        fadeDuration: 0,
+        cancelPendingTileRequestsWhileZooming: true,
+        attributionControl: false, // credits live in the caption under the toolbar (App.tsx), not on the map
       });
       mapRef.current = map;
+      (window as any).__twinMap = map; // dev diagnostics (Data Sources / console)
+      map.on("error", (e) => console.error("maplibre:", (e as any)?.error ?? e));
       wireMap(map);
     });
 
     const wireMap = (map: maplibregl.Map) => {
+    map.on("movestart", (e) => {
+      setMapInteracting(true);
+      clearTimeout(viewportTimer);
+      popupRef.current?.remove();
+      container.closest(".main")?.classList.add("map-moving");
+      if (e.originalEvent) suspendTerrainForMove(map, true); // user drag/scroll/rotate only, not flyTo
+    });
+    map.on("moveend", () => {
+      setMapInteracting(false);
+      container.closest(".main")?.classList.remove("map-moving");
+      suspendTerrainForMove(map, false);
+    });
     // some vendor style layers reference sprite patterns we do not ship; provide a blank pixel instead of a warning
     map.on("styleimagemissing", (e) => {
       if (!map.hasImage(e.id)) map.addImage(e.id, { width: 1, height: 1, data: new Uint8Array(4) });
     });
     map.on("load", () => {
+      try {
+      csdiSlopesState.bbox = null;
+      csdiSlopesState.seq++;
+      entliState.bbox = null;
+      entliState.seq++;
       mountOwnLayers(map);
 
       // interactions
@@ -443,6 +766,31 @@ export default function MapView() {
         useStore.getState().selectSlope(id);
         useStore.getState().flyToSlope(id);
       });
+      map.on("click", "slopes-blobs-fill", (e) => {
+        const cell = e.features?.[0]?.properties?.cell as string | undefined;
+        const ids = cell ? cellSlopes.get(cell) : undefined;
+        if (!ids?.length) return;
+        const st = useStore.getState();
+        const best = ids.reduce((b, id) => ((st.assessments.get(id)?.score ?? -1) > (st.assessments.get(b)?.score ?? -1) ? id : b), ids[0]);
+        st.selectSlope(best);
+        st.flyToSlope(best);
+      });
+      map.on("mousemove", "slopes-blobs-fill", (e) => {
+        if (map.isMoving()) return;
+        const f = e.features?.[0];
+        if (!f) return;
+        map.getCanvas().style.cursor = "pointer";
+        const n = f.properties?.n ?? 0;
+        popupRef.current ??= new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 10 });
+        popupRef.current
+          .setLngLat(e.lngLat)
+          .setHTML(`<div style="font-weight:600">${n} registered slope${n === 1 ? "" : "s"} here</div><div style="color:#6d7a8c;font-size:10px">coloured by the worst current band · click to open the highest-risk one · zoom in for individual slopes</div>`)
+          .addTo(map);
+      });
+      map.on("mouseleave", "slopes-blobs-fill", () => {
+        map.getCanvas().style.cursor = "";
+        popupRef.current?.remove();
+      });
       map.on("click", "slopes-pt", (e) => {
         const f = e.features?.[0];
         if (!f) return;
@@ -451,10 +799,12 @@ export default function MapView() {
         useStore.getState().flyToSlope(id);
       });
       for (const hoverLayer of ["slopes-fill", "slopes-pt"]) map.on("mousemove", hoverLayer, (e) => {
+        if (map.isMoving()) return;
         map.getCanvas().style.cursor = "pointer";
         const f = e.features?.[0];
         if (!f) return;
         const p = f.properties as any;
+        const st = ((f as any).state ?? {}) as { cat?: string; color?: string; score?: number; conf?: number };
         if (!popupRef.current) {
           popupRef.current = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 10 });
         }
@@ -462,8 +812,8 @@ export default function MapView() {
           .setLngLat(e.lngLat)
           .setHTML(
             `<div style="font-family:var(--mono);font-weight:600">${p.id}</div>` +
-              `<div style="color:${p.color};font-weight:700;text-transform:uppercase;font-size:10px;letter-spacing:1px">${p.cat} · ${p.score}/100</div>` +
-              `<div style="color:#6d7a8c;font-size:10px">${p.district} · confidence ${Math.round(p.conf * 100)}% · synthetic risk · CEDD geometry</div>`
+              `<div style="color:${st.color ?? "#7c8794"};font-weight:700;text-transform:uppercase;font-size:10px;letter-spacing:1px">${st.cat ?? "no-data"} · ${st.score ?? 0}/100</div>` +
+              `<div style="color:#6d7a8c;font-size:10px">${p.district} · confidence ${Math.round((st.conf ?? 0) * 100)}% · synthetic risk · CEDD geometry</div>`
           )
           .addTo(map);
       });
@@ -476,15 +826,19 @@ export default function MapView() {
       const KIND_LABEL: Record<string, string> = {
         hospital: "Hospital",
         school: "School",
+        kindergarten: "Kindergarten",
+        clinic: "Clinic",
+        "fire-station": "Fire station",
+        police: "Police station",
         railway: "Rail segment",
-        building: "Residential block",
+        building: "Building block",
         landslide: "Landslide",
         rockfall: "Rockfall",
         "debris-flow": "Debris flow",
         "road-blockage": "Road blockage",
         flooding: "Flooding",
       };
-      for (const layerId of ["buildings-pt", "incidents-pt"]) {
+      for (const layerId of ["buildings-pt", "facilities-local-pt", "building-blocks-pt", "incidents-pt"]) {
         map.on("mousemove", layerId, (e) => {
           const f = e.features?.[0];
           if (!f) return;
@@ -492,11 +846,13 @@ export default function MapView() {
           const p = f.properties as any;
           if (!popupRef.current) popupRef.current = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 10 });
           const label = KIND_LABEL[p.kind] ?? p.kind;
-          const title = layerId === "incidents-pt" ? `${label} · severity ${p.severity}` : label;
-          const sub = layerId === "incidents-pt" ? `active incident · ${p.id}` : String(p.name ?? "").replace(" (synthetic)", "");
+          const isIncident = layerId === "incidents-pt";
+          const title = isIncident ? `${label} · severity ${p.severity}` : String(p.name ?? label);
+          const sub = isIncident ? `active incident · ${p.id} · synthetic` : `${label}${p.sub ? ` · ${p.sub}` : ""}${p.height ? ` · ${p.height} m` : ""}`;
+          const foot = isIncident ? "" : p.real ? `<div style="color:#18a08f;font-size:9px;letter-spacing:0.6px;font-weight:700">REAL · ${p.kind === "building" ? "LandsD" : "CSDI"} open data</div>` : `<div style="color:#6d7a8c;font-size:9px">synthetic</div>`;
           popupRef.current
             .setLngLat(e.lngLat)
-            .setHTML(`<div style="font-weight:600">${title}</div><div style="color:#6d7a8c;font-size:10px">${sub} · synthetic</div>`)
+            .setHTML(`<div style="font-weight:600">${title}</div><div style="color:#6d7a8c;font-size:10px">${sub}</div>${foot}`)
             .addTo(map);
         });
         map.on("mouseleave", layerId, () => {
@@ -510,18 +866,45 @@ export default function MapView() {
         popupRef.current ??= new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 10 });
         return popupRef.current;
       });
-      map.on("moveend", () => refreshCsdiSlopes(map));
+      map.on("moveend", () => {
+        if (cancelled) return;
+        clearTimeout(viewportTimer);
+        viewportTimer = setTimeout(() => {
+          refreshCsdiSlopes(map);
+          refreshEntli(map);
+          refreshRoads(map);
+        }, 180);
+      });
       syncCsdiData(map, useStore.getState().layers);
 
       loadedRef.current = true;
       applyVisibility(map, useStore.getState().layers);
       applyRiskFilter(map, useStore.getState().riskFilter);
+      const state = useStore.getState();
+      showSelection(map, state.slopes.find((s) => s.id === state.selectedSlopeId));
       useStore.getState().setMapLoaded(true);
+      } catch (err) {
+        // never leave the app stuck on "Loading terrain…": surface the failure and carry on
+        console.error("Map layers failed to mount:", err);
+        (window as any).__twinMapError = String((err as Error)?.stack ?? err);
+        loadedRef.current = true;
+        useStore.getState().setMapLoaded(true);
+      }
     });
     };
 
     return () => {
       cancelled = true;
+      csdiSlopesState.seq++;
+      entliState.seq++;
+      resizeObserver.disconnect();
+      cancelAnimationFrame(resizeFrame);
+      clearTimeout(viewportTimer);
+      setMapInteracting(false);
+      if (mapRef.current) riskPasses.set(mapRef.current, -1);
+      selectionMarkerRef.current?.remove();
+      selectionMarkerRef.current = null;
+      popupRef.current?.remove();
       loadedRef.current = false;
       useStore.getState().setMapLoaded(false);
       mapRef.current?.remove();
@@ -534,6 +917,7 @@ export default function MapView() {
     const map = mapRef.current;
     if (!map || !loadedRef.current || basemapRef.current === basemap) return;
     basemapRef.current = basemap;
+    riskPasses.set(map, -1);
     map.setStyle(styleFor(basemap), {
       transformStyle: (prev, nextRaw) => {
         const next = tuneStyle(basemap, nextRaw);
@@ -550,19 +934,33 @@ export default function MapView() {
         if (firstSymbolIdx >= 0) base.splice(firstSymbolIdx, 0, ...under);
         else base.push(...under);
 
-        return { ...next, sources, layers: [...base, ...own], terrain: prev?.terrain ?? { source: "dem", exaggeration: 1.5 } };
+        return { ...next, sources, layers: [...base, ...own], terrain: useStore.getState().map3d ? { source: "dem", exaggeration: 1.5 } : undefined };
       },
+    });
+    // feature-state does not survive a style swap: re-apply every slope once the new style is in
+    map.once("style.load", () => {
+      const s = useStore.getState();
+      applyMapMode(map, s.map3d);
+      void applyRiskState(map, s.slopes, s.assessments, s.stormMode, s.stormHorizonH, s.gameTime, true);
+      showSelection(map, s.slopes.find((slope) => slope.id === s.selectedSlopeId));
     });
   }, [basemap]);
 
-  // ---- update slope colors on assessment/storm changes ----
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+    applyMapMode(map, map3d);
+    map.easeTo({ pitch: map3d ? 45 : 0, duration: 250 });
+  }, [map3d, mapLoaded]);
+
+  // ---- update slope colors on assessment/storm changes (feature-state diff, no GeoJSON re-upload) ----
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !loadedRef.current) return;
-    const fc = slopeFC(slopes, assessments, stormMode, stormHorizonH, useStore.getState().gameTime);
-    const src = map.getSource("slopes") as maplibregl.GeoJSONSource | undefined;
-    src?.setData(fc);
-    (map.getSource("slopes-pts") as maplibregl.GeoJSONSource | undefined)?.setData(slopePointFC(fc, slopes));
+    const timer = setTimeout(() => {
+      void applyRiskState(map, slopes, assessments, stormMode, stormHorizonH, useStore.getState().gameTime);
+    }, 60);
+    return () => clearTimeout(timer);
   }, [slopes, assessments, stormMode, stormHorizonH]);
 
   // ---- layer visibility (+ lazy-load live CSDI data for layers just toggled on) ----
@@ -589,16 +987,16 @@ export default function MapView() {
         map.easeTo({ bearing: map.getBearing() + (viewCmd.delta ?? 30), duration: 500 });
         break;
       case "tilt":
-        map.easeTo({ pitch: Math.max(0, Math.min(72, map.getPitch() + (viewCmd.delta ?? 15))), duration: 400 });
+        map.easeTo({ pitch: Math.max(0, Math.min(62, map.getPitch() + (viewCmd.delta ?? 15))), duration: 400 });
         break;
       case "north":
         map.easeTo({ bearing: 0, duration: 500 });
         break;
       case "zoom":
-        map.easeTo({ zoom: map.getZoom() + (viewCmd.delta ?? 1), duration: 350 });
+        map.easeTo({ zoom: map.getZoom() + (viewCmd.delta ?? 1), duration: 160 });
         break;
       case "home":
-        map.easeTo({ center: HK_CENTER, zoom: 10.4, pitch: 52, bearing: -12, duration: 1200 });
+        map.easeTo({ center: HK_CENTER, zoom: 10.4, pitch: useStore.getState().map3d ? 52 : 0, bearing: -12, duration: 400 });
         break;
     }
   }, [viewCmd]);
@@ -606,26 +1004,31 @@ export default function MapView() {
   // ---- fly to ----
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !flyTo) return;
-    map.easeTo({
-      center: flyTo.center,
-      zoom: flyTo.zoom,
-      pitch: 58,
-      duration: 1400,
-      padding: { left: commandCenterOpen ? Math.min(window.innerWidth * 0.58, window.innerWidth - 380) : 0, top: 0, right: 0, bottom: 0 },
+    if (!map || !mapLoaded || !flyTo) return;
+    const frame = requestAnimationFrame(() => {
+      const slope = slopes.find((s) => s.id === selectedSlopeId);
+      if (slope) focusSlope(map, slope);
+      else map.easeTo({ center: flyTo.center, zoom: flyTo.zoom, padding: 0, duration: 550 });
     });
-  }, [flyTo, commandCenterOpen]);
+    return () => cancelAnimationFrame(frame);
+  }, [flyTo, commandCenterOpen, mapLoaded]);
 
   // ---- selected outline ----
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !loadedRef.current) return;
-    const src = map.getSource("selected") as maplibregl.GeoJSONSource | undefined;
     const s = slopes.find((x) => x.id === selectedSlopeId);
-    src?.setData(
-      s ? { type: "FeatureCollection", features: [{ type: "Feature", geometry: { type: "Polygon", coordinates: [s.polygon] }, properties: {} }] } : EMPTY_FC
-    );
-  }, [selectedSlopeId, slopes]);
+    showSelection(map, s);
+    selectionMarkerRef.current?.remove();
+    selectionMarkerRef.current = null;
+    if (s) {
+      const label = document.createElement("div");
+      label.className = "selected-slope-marker";
+      label.textContent = s.id;
+      selectionMarkerRef.current = new maplibregl.Marker({ element: label, anchor: "bottom", offset: [0, -28] })
+        .setLngLat(s.centroid).addTo(map);
+    }
+  }, [selectedSlopeId, slopes, mapLoaded]);
 
   // ---- runout animation over terrain ----
   useEffect(() => {
@@ -635,11 +1038,15 @@ export default function MapView() {
     const frontSrc = map.getSource("runout-front") as maplibregl.GeoJSONSource | undefined;
     if (!runoutSrc || !frontSrc) return;
     if (!simResult || !simResult.failureLikely) {
+      if (lastRunoutRef.current?.result === null) return;
       runoutSrc.setData(EMPTY_FC);
       frontSrc.setData(EMPTY_FC);
+      lastRunoutRef.current = { result: null, frame: -1 };
       return;
     }
     const frame = simResult.frames.reduce((best, f) => (f.tSec <= animTimeSec ? f : best), simResult.frames[0]);
+    if (lastRunoutRef.current?.result === simResult && lastRunoutRef.current.frame === frame.tSec) return;
+    lastRunoutRef.current = { result: simResult, frame: frame.tSec };
     const frac = Math.min(1, frame.debrisFrontM / Math.max(1, simResult.runoutDistanceM));
     const path = simResult.runoutPath;
     const n = Math.max(2, Math.ceil(frac * path.length));
@@ -682,6 +1089,13 @@ export default function MapView() {
     (map.getSource("incidents") as maplibregl.GeoJSONSource | undefined)?.setData(incidentFC(incidents));
   }, [incidents]);
 
+  // ---- HKO live rainfall stations (refreshed every 5 min by the store) ----
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !loadedRef.current) return;
+    setSrcData(map, "live-rain", liveRainFC(liveRain));
+  }, [liveRain]);
+
   // `assets` only feed sources at mount; referenced here so the dependency is explicit
   void assets;
 
@@ -694,12 +1108,17 @@ function applyVisibility(map: maplibregl.Map, layers: ReturnType<typeof useStore
     if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", vis(on));
   };
   safe("slopes-pt", layers.slopeRisk);
+  safe("slopes-blobs-fill", layers.slopeRisk);
   safe("slopes-fill", layers.slopeRisk);
   safe("slopes-line", layers.slopeRisk);
   safe("uncertainty-fill", layers.uncertainty);
   safe("rain-heat", layers.rainfall);
   safe("roads-line", layers.roads);
+  safe("csdi-roads-line", layers.roads);
   safe("buildings-pt", layers.buildings);
+  safe("facilities-local-pt", layers.buildings);
+  safe("building-blocks-pt", layers.buildings);
+  safe("buildings-3d", layers.buildings && useStore.getState().map3d);
   safe("drainage-pt", layers.drainage);
   safe("mitigated-pt", layers.mitigations);
   safe("historical-pt", layers.historicalLandslides);
@@ -711,6 +1130,13 @@ function applyVisibility(map: maplibregl.Map, layers: ReturnType<typeof useStore
   safe("csdi-slopes-line", layers.csdiSlopes);
   safe("csdi-blackspots-pt", layers.csdiBlackspots);
   safe("csdi-landslides-pt", layers.csdiLandslides);
+  safe("csdi-lpm-fill", layers.csdiLpm);
+  safe("csdi-lpm-line", layers.csdiLpm);
+  safe("csdi-lpm-pt", layers.csdiLpm);
+  safe("entli-grid-fill", layers.csdiEntli);
+  safe("csdi-entli-trails-line", layers.csdiEntli);
+  safe("csdi-entli-crowns-pt", layers.csdiEntli);
+  safe("live-rain-pt", layers.liveRain);
 }
 
 // ---------- live CSDI data wiring (real HK government layers) ----------
@@ -721,13 +1147,19 @@ const CSDI_SLOPES_MIN_ZOOM = 12; // 61k polygons: only fetch the viewport once z
 const csdiSlopesState = { bbox: null as null | [number, number, number, number], truncated: false, seq: 0 };
 
 function setSrcData(map: maplibregl.Map, id: string, fc: any) {
-  (map.getSource(id) as maplibregl.GeoJSONSource | undefined)?.setData(fc);
+  // async loaders may resolve after the map was removed (view switched) — maplibre then throws on getSource
+  try {
+    (map.getSource(id) as maplibregl.GeoJSONSource | undefined)?.setData(fc);
+  } catch {
+    /* map gone */
+  }
 }
 
 /** Fetch CEDD registered slopes for the current viewport (debounced by bbox containment). */
 function refreshCsdiSlopes(map: maplibregl.Map) {
   if (!useStore.getState().layers.csdiSlopes) return;
   if (map.getZoom() < CSDI_SLOPES_MIN_ZOOM) {
+    csdiSlopesState.seq++;
     csdiSlopesState.bbox = null;
     setSrcData(map, "csdi-slopes", EMPTY_FC);
     return;
@@ -750,6 +1182,88 @@ function refreshCsdiSlopes(map: maplibregl.Map) {
     .catch((err) => console.warn("CSDI slopes fetch failed:", err));
 }
 
+const ENTLI_MIN_ZOOM = 13; // 226k features: crowns/trails only per viewport (dense hills hit the 3,000 cap below this); the baked grid covers lower zooms
+const entliState = { bbox: null as null | [number, number, number, number], truncated: false, seq: 0 };
+
+/** Fetch ENTLI crowns + trails for the current viewport (same bbox-containment debounce as the slopes). */
+function refreshEntli(map: maplibregl.Map) {
+  if (!useStore.getState().layers.csdiEntli) return;
+  if (map.getZoom() < ENTLI_MIN_ZOOM) {
+    entliState.seq++;
+    entliState.bbox = null;
+    setSrcData(map, "csdi-entli-crowns", EMPTY_FC);
+    setSrcData(map, "csdi-entli-trails", EMPTY_FC);
+    return;
+  }
+  const b = map.getBounds();
+  const w = b.getWest(), s = b.getSouth(), e = b.getEast(), n = b.getNorth();
+  const prev = entliState.bbox;
+  if (prev && !entliState.truncated && w >= prev[0] && s >= prev[1] && e <= prev[2] && n <= prev[3]) return;
+  const mx = (e - w) * 0.25, my = (n - s) * 0.25;
+  const box: [number, number, number, number] = [w - mx, s - my, e + mx, n + my];
+  const seq = ++entliState.seq;
+  fetchEntliInBbox(...box)
+    .then(({ crowns, trails, truncated }) => {
+      if (seq !== entliState.seq) return;
+      entliState.bbox = box;
+      entliState.truncated = truncated;
+      setSrcData(map, "csdi-entli-crowns", crowns);
+      setSrcData(map, "csdi-entli-trails", trails);
+    })
+    .catch((err) => console.warn("CSDI ENTLI fetch failed:", err));
+}
+
+const ROADS_MIN_ZOOM = 13; // 40k centrelines: per viewport only; below this the basemap's own roads suffice
+const roadsState = { bbox: null as null | [number, number, number, number], truncated: false, seq: 0 };
+
+/** Fetch LandsD road centrelines for the current viewport (bbox-containment debounce). */
+function refreshRoads(map: maplibregl.Map) {
+  if (!useStore.getState().layers.roads) return;
+  if (map.getZoom() < ROADS_MIN_ZOOM) {
+    roadsState.bbox = null;
+    setSrcData(map, "csdi-roads", EMPTY_FC);
+    return;
+  }
+  const b = map.getBounds();
+  const w = b.getWest(), s = b.getSouth(), e = b.getEast(), n = b.getNorth();
+  const prev = roadsState.bbox;
+  if (prev && !roadsState.truncated && w >= prev[0] && s >= prev[1] && e <= prev[2] && n <= prev[3]) return;
+  const mx = (e - w) * 0.3, my = (n - s) * 0.3;
+  const box: [number, number, number, number] = [w - mx, s - my, e + mx, n + my];
+  const seq = ++roadsState.seq;
+  fetchRoadsInBbox(...box)
+    .then(({ fc, truncated }) => {
+      if (seq !== roadsState.seq) return;
+      roadsState.bbox = box;
+      roadsState.truncated = truncated;
+      setSrcData(map, "csdi-roads", fc);
+    })
+    .catch((err) => console.warn("LandsD roads fetch failed:", err));
+}
+
+let entliGridFC: any | null = null;
+
+/** Build the ENTLI density grid once from the baked chunk (lazy import — only paid when the layer is toggled on). */
+async function ensureEntliGrid(map: maplibregl.Map) {
+  if (!entliGridFC) {
+    const [{ ENTLI_GRID: g }, { u16 }] = await Promise.all([import("@/live/baked/entliGrid"), import("@/live/baked/decode")]);
+    const cells = u16(g.cells), rc = u16(g.recent), rl = u16(g.relict);
+    const features: any[] = [];
+    for (let k = 0; k < cells.length; k++) {
+      const i = cells[k];
+      const q = i % g.cols, r = Math.floor(i / g.cols);
+      const x0 = g.lon0 + q * g.dLon, y0 = g.lat0 + r * g.dLat;
+      features.push({
+        type: "Feature",
+        geometry: { type: "Polygon", coordinates: [[[x0, y0], [x0 + g.dLon, y0], [x0 + g.dLon, y0 + g.dLat], [x0, y0 + g.dLat], [x0, y0]]] },
+        properties: { d: rc[k] + rl[k], recent: rc[k], relict: rl[k] },
+      });
+    }
+    entliGridFC = { type: "FeatureCollection", features };
+  }
+  setSrcData(map, "entli-grid", entliGridFC);
+}
+
 /** Load whichever CSDI layers are toggled on (cached after first load). */
 function syncCsdiData(map: maplibregl.Map, layers: ReturnType<typeof useStore.getState>["layers"]) {
   if (layers.csdiBlackspots) {
@@ -762,6 +1276,19 @@ function syncCsdiData(map: maplibregl.Map, layers: ReturnType<typeof useStore.ge
       .then((fc) => setSrcData(map, "csdi-landslides", fc))
       .catch((err) => console.warn("CSDI landslides fetch failed:", err));
   }
+  if (layers.csdiLpm) {
+    fetchLpmWorks()
+      .then((w) => {
+        setSrcData(map, "csdi-lpm", w.fc);
+        setSrcData(map, "csdi-lpm-pts", polygonCentroidFC(w.fc));
+      })
+      .catch((err) => console.warn("CSDI LPM works fetch failed:", err));
+  }
+  if (layers.csdiEntli) {
+    ensureEntliGrid(map).catch((err) => console.warn("ENTLI grid unavailable:", err));
+    refreshEntli(map);
+  }
+  if (layers.roads) refreshRoads(map);
   refreshCsdiSlopes(map);
 }
 
@@ -807,14 +1334,51 @@ function wireCsdiPopups(map: maplibregl.Map, popupFor: () => maplibregl.Popup) {
       foot("CEDD")
     );
   });
+  const lpmHtml = (p: any) =>
+    `<div style="font-family:var(--mono);font-weight:600">${p.slopeNo}</div>` +
+    `<div style="font-size:10px">LPM ${p.kind === "catchment" ? "natural hillside catchment" : "substandard slope"} · contract ${p.contract}</div>` +
+    `<div style="color:#6d7a8c;font-size:10px">${p.location ?? ""}</div>` +
+    `<div style="color:#6d7a8c;font-size:10px">Works ${p.startLabel} → ${p.completionLabel}</div>` +
+    foot("CEDD LPMitP");
+  wire("csdi-lpm-fill", lpmHtml);
+  wire("csdi-roads-line", (p) => (
+    `<div style="font-weight:600">${p.ENGLISHSTREETNAME || "Unnamed road"}</div>` +
+    `<div style="font-size:10px">${p.STREETTYPE ?? "Road"} · road centreline</div>` +
+    foot("LandsD")
+  ));
+  wire("csdi-lpm-pt", lpmHtml);
+  const ENTLI_TYPE: Record<string, string> = { R: "relict (pre-1963 baseline)", C: "recent · channelised", O: "recent · open hillslope", S: "recent · other" };
+  wire("csdi-entli-crowns-pt", (p) => (
+    `<div style="font-family:var(--mono);font-weight:600">${p.ENTLI_NO}</div>` +
+    `<div style="font-size:10px">Natural terrain landslide · ${ENTLI_TYPE[p.SLIDE_TYPE] ?? p.SLIDE_TYPE}${p.YEAR_1 ? ` · ${p.YEAR_1}` : ""}</div>` +
+    `<div style="color:#6d7a8c;font-size:10px">width ${p.M_WIDTH ?? "—"} m · length ${p.S_LENGTH ?? "—"} m · slope ${p.SLOPE ?? "—"}° · drop ${p.ELE_DIFF ?? "—"} m</div>` +
+    foot("CEDD ENTLI")
+  ));
+  wire("entli-grid-fill", (p) => (
+    `<div style="font-weight:600">${p.d} landslide crown${p.d === 1 ? "" : "s"} in this 250 m cell</div>` +
+    `<div style="color:#6d7a8c;font-size:10px">${p.recent} recent (dated) · ${p.relict} relict · ≈ ${Math.round(p.d / 0.0625)} per km²</div>` +
+    foot("CEDD ENTLI")
+  ));
+  wire("live-rain-pt", (p) => (
+    `<div style="font-weight:600">${p.name} <span style="font-family:var(--mono);color:#6d7a8c">${p.id}</span></div>` +
+    `<div style="font-size:12px"><b>${p.mmHr} mm</b> in the past hour · obs ${String(p.obsTime).slice(11, 16)} HKT</div>` +
+    `<div style="color:#6d7a8c;font-size:10px">${p.mm24 >= 0 ? `${p.mm24} mm over the last ${p.hoursCounted} h` : "24-h total not available (direct HKO mode)"}</div>` +
+    `<div style="color:#3d8bfd;font-size:9px;letter-spacing:0.6px;font-weight:700">LIVE DATA · HKO Open Data API</div>`
+  ));
 }
 
+/** Legend filter: hide whole risk classes through feature-state (filters cannot read feature-state). */
 function applyRiskFilter(map: maplibregl.Map, filter: ReturnType<typeof useStore.getState>["riskFilter"]) {
-  const cats = Object.entries(filter)
-    .filter(([, on]) => on)
-    .map(([c]) => c);
-  const expr: any = ["in", ["get", "cat"], ["literal", cats]];
-  for (const id of ["slopes-pt", "slopes-fill", "slopes-line", "uncertainty-fill"]) {
-    if (map.getLayer(id)) map.setFilter(id, expr);
+  hiddenCats = new Set(
+    Object.entries(filter)
+      .filter(([, on]) => !on)
+      .map(([c]) => c)
+  );
+  if (!map.getSource("slopes")) return;
+  for (const [id, cat] of riskCat) {
+    const hidden = hiddenCats.has(cat);
+    map.setFeatureState({ source: "slopes", id }, { hidden });
+    map.setFeatureState({ source: "slopes-pts", id }, { hidden });
   }
+  applyBlobState(map, true);
 }

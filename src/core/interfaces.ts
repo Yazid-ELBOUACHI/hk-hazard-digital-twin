@@ -9,6 +9,7 @@ import type {
   InterventionOption,
   KpiSnapshot,
   RiskAssessment,
+  RiskCategory,
   ScenarioParams,
   SensorKind,
   SensorReading,
@@ -55,6 +56,10 @@ export interface InterventionRepository {
 export interface RiskEngine {
   assess(slope: Slope, gameTime: number): RiskAssessment;
   assessAll(slopes: Slope[], gameTime: number): Map<string, RiskAssessment>;
+  /** Same result as assessAll, computed in chunks that yield to the browser between them. */
+  assessAllAsync(slopes: Slope[], gameTime: number): Promise<Map<string, RiskAssessment>>;
+  /** Cheap projected score/category at +hours (no drivers, no explanation) — for map colouring. */
+  projectScore(slope: Slope, gameTime: number, plusHours: number): { score: number; category: RiskCategory };
   kpis(slopes: Slope[], assessments: Map<string, RiskAssessment>, gameTime: number): Promise<KpiSnapshot>;
   /** Projected assessment under a storm forecast at +hours. */
   projectUnderStorm(slope: Slope, gameTime: number, plusHours: number): RiskAssessment;

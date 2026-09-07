@@ -48,8 +48,9 @@ export function attachRain3d(map: maplibregl.Map): Rain3d {
 
   const spawn = (i: number, fromTop: boolean) => {
     const lon = west + Math.random() * (east - west), lat = south + Math.random() * (north - south);
-    // centre-relative, which is the frame deck draws in; a drop lives a few seconds so the centre barely moves meanwhile
-    const g = map.queryTerrainElevation({ lng: lon, lat }) ?? 0;
+    // absolute metres: maplibre's query is relative to the terrain under the map centre, deck's frame is not
+    const q = map.queryTerrainElevation({ lng: lon, lat });
+    const g = q === null ? 0 : q + ((map as any).transform?.elevation ?? 0);
     const z = g + (fromTop ? CEILING_M * (0.85 + Math.random() * 0.15) : Math.random() * CEILING_M);
     const o = i * 3;
     src[o] = lon; src[o + 1] = lat; src[o + 2] = z;

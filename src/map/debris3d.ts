@@ -102,15 +102,16 @@ const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 
 export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | null) => void, elevationAt?: ElevationAt): Debris3d {
   const deck = getDeckOverlay(map);
-  // Heights are kept ABSOLUTE internally (maplibre's queryTerrainElevation is relative to the terrain under the map
-  // centre, so add that back when sampling) and converted to centre-relative at draw time, because that is the frame
-  // custom/deck layers are drawn in — cached absolute heights then stay right however the camera moves.
+  // Heights are ABSOLUTE metres: maplibre's queryTerrainElevation is relative to the terrain under the map centre, and
+  // deck's interleaved viewport is lifted by that same centre elevation (measured: q + transform.elevation projects
+  // onto maplibre's own pixel for the point to within 1 px). Sampling adds the centre back, so caches stay valid
+  // wherever the camera goes.
   const centerElev = () => ((map as any).transform?.elevation ?? 0) as number;
   const elev: ElevationAt = elevationAt ?? ((lon, lat) => {
     const q = map.queryTerrainElevation({ lng: lon, lat });
     return q === null ? 0 : q + centerElev();
   });
-  let zOff = 0; // absolute → draw frame, refreshed every frame
+  const zOff = 0; // draw frame = absolute; kept as a single knob should a LiDAR mesh come in another datum
 
   let result: SimulationResult | null = null;
   let origin: [number, number] = [0, 0];
@@ -329,7 +330,6 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
     tSim += dt;
-    zOff = centerElev();
     front += (targetFront - front) * Math.min(1, dt * 3);
     for (const a of agents) {
       if (!a.hit) {

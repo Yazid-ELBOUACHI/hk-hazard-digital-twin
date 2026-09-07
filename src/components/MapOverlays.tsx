@@ -76,6 +76,13 @@ export default function MapOverlays() {
   const basemap = useStore((s) => s.basemap);
   const setBasemap = useStore((s) => s.setBasemap);
   const map3d = useStore((s) => s.map3d);
+  const sim3dActive = useStore((s) => s.sim3dActive);
+  const sim3dImpact = useStore((s) => s.sim3dImpact);
+  const setSim3d = useStore((s) => s.setSim3d);
+  const simResult = useStore((s) => s.simResult);
+  const animPlaying = useStore((s) => s.animPlaying);
+  const animTimeSec = useStore((s) => s.animTimeSec);
+  const setAnim = useStore((s) => s.setAnim);
   const setMap3d = useStore((s) => s.setMap3d);
 
   const [q, setQ] = useState("");
@@ -241,6 +248,34 @@ export default function MapOverlays() {
               <span>Click a class to isolate it</span>
             )}
           </div>
+        </div>
+      )}
+
+      {sim3dActive && (
+        <div className="sim3d-hud">
+          <div className="sim3d-title">
+            3D playback <span className="tag">illustrative</span>
+            {simResult && (
+              <span className="sim3d-sub">
+                {simResult.params.rainfallMm} mm / {simResult.params.rainfallDurationH} h · runout {simResult.runoutDistanceM} m
+                {sim3dImpact ? ` · ${sim3dImpact.phase} · front ${sim3dImpact.frontM} m` : ""}
+              </span>
+            )}
+          </div>
+          <div className="sim3d-tally">
+            <span><b>{sim3dImpact?.buildings ?? 0}</b> buildings hit</span>
+            <span><b>{sim3dImpact?.roads ?? 0}</b> road segments</span>
+            <span><b>{sim3dImpact?.people ?? 0}</b> people</span>
+            <span><b>{sim3dImpact?.vehicles ?? 0}</b> vehicles</span>
+          </div>
+          <div className="sim3d-controls">
+            <button onClick={() => setAnim({ playing: !animPlaying })} title={animPlaying ? "Pause" : "Play"}>{animPlaying ? "⏸" : "▶"}</button>
+            <button onClick={() => setAnim({ timeSec: 0, playing: true })} title="Restart">⟲</button>
+            <input type="range" min={0} max={60} step={0.5} value={animTimeSec} onChange={(e) => setAnim({ timeSec: +e.target.value, playing: false })} />
+            <span className="t">{animTimeSec.toFixed(0)} s</span>
+            <button onClick={() => setSim3d(false)} title="Back to the Command Center">Exit</button>
+          </div>
+          <div className="sim3d-note">Runout is the scenario engine's result, not a physical simulation. People and vehicles are synthetic placements on real LandsD road centrelines.</div>
         </div>
       )}
 

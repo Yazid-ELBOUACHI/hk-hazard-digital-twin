@@ -324,3 +324,17 @@ table.data.ds td.small { font-size: 11px; color: var(--text-1); }
 .ds-status .ok { color: var(--risk-low); }
 .ds-status .err { color: #ff8577; }
 .ds-status .muted { color: var(--text-2); }
+
+/* ---- 3D scenario playback HUD (MapOverlays) ---- */
+.sim3d-hud { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 6; width: min(600px, calc(100% - 48px)); padding: 10px 14px 9px; border-radius: 14px; background: rgba(12, 16, 24, 0.8); color: #e8ecf3; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35); font-size: 12px; }
+.sim3d-title { font-weight: 700; font-size: 13px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.sim3d-title .tag { font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase; padding: 2px 6px; border-radius: 6px; background: rgba(255, 200, 80, 0.18); color: #ffd76b; }
+.sim3d-sub { font-weight: 400; color: #aab3c2; font-size: 11px; font-family: var(--mono); }
+.sim3d-tally { display: flex; gap: 16px; margin: 8px 0 6px; flex-wrap: wrap; color: #c9d0da; }
+.sim3d-tally b { font-size: 16px; margin-right: 4px; color: #ff8577; font-family: var(--mono); }
+.sim3d-controls { display: flex; align-items: center; gap: 8px; }
+.sim3d-controls button { border: none; border-radius: 8px; padding: 5px 10px; background: rgba(255, 255, 255, 0.12); color: #fff; cursor: pointer; font-size: 12px; }
+.sim3d-controls button:hover { background: rgba(255, 255, 255, 0.2); }
+.sim3d-controls input[type="range"] { flex: 1; }
+.sim3d-controls .t { font-family: var(--mono); font-size: 11px; min-width: 32px; text-align: right; }
+.sim3d-note { margin-top: 6px; font-size: 10px; color: #8d97a8; line-height: 1.4; }

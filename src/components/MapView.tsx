@@ -10,7 +10,7 @@ import type { StyleSpecification, LayerSpecification } from "maplibre-gl";
 import { useStore, BasemapId } from "@/state/store";
 import { registry } from "@/core/registry";
 import { HK_CENTER } from "@/mock/geo";
-import { RISK_COLORS, Slope, RiskAssessment, RiskCategory, Asset, Incident } from "@/core/types";
+import { RISK_COLORS, Slope, RiskAssessment, RiskCategory, Asset, Incident, SimulationResult } from "@/core/types";
 import { offsetM } from "@/mock/geo";
 import { fetchSlopesInBbox, fetchBlackspots, fetchLandslides, fetchLpmWorks, fetchEntliInBbox, fetchRoadsInBbox } from "@/live/csdi";
 import type { LiveRain } from "@/live/hko";
@@ -18,6 +18,8 @@ import { setMapInteracting, yieldForMap } from "@/core/schedule";
 import { slopeCamera } from "@/core/mapSelection";
 import { rainRateAt } from "@/mock/signals";
 import type { Rain3d } from "@/map/rain3d";
+import type { Debris3d } from "@/map/debris3d";
+import { disposeDeckOverlay } from "@/map/deckOverlay";
 
 const DARK_STYLE_URL = "https://tiles.openfreemap.org/styles/dark";
 const LIGHT_STYLE_URL = "https://tiles.openfreemap.org/styles/positron";
@@ -664,6 +666,8 @@ export default function MapView() {
   const lastRunoutRef = useRef<{ result: typeof simResult; frame: number } | null>(null);
   const basemapRef = useRef<BasemapId>(useStore.getState().basemap);
   const rain3dRef = useRef<Rain3d | null>(null);
+  const debris3dRef = useRef<Debris3d | null>(null);
+  const sim3dResultRef = useRef<SimulationResult | null>(null);
 
   const slopes = useStore((s) => s.slopes);
   const assets = useStore((s) => s.assets);
@@ -683,6 +687,7 @@ export default function MapView() {
   const liveRain = useStore((s) => s.liveRain);
   const mapLoaded = useStore((s) => s.mapLoaded);
   const map3d = useStore((s) => s.map3d);
+  const sim3dActive = useStore((s) => s.sim3dActive);
 
   // ---- init map ----
   useEffect(() => {
@@ -776,6 +781,10 @@ export default function MapView() {
         const s = useStore.getState();
         rain.setEnabled(s.layers.rain3d && s.map3d);
         rain.setIntensity(rainRateAt(s.gameTime));
+      });
+      void import("@/map/debris3d").then(({ attachDebris3d }) => {
+        if (cancelled || mapRef.current !== map) return;
+        debris3dRef.current = attachDebris3d(map, (i) => useStore.getState().setSim3dImpact(i));
       });
 
       // interactions
@@ -930,6 +939,9 @@ export default function MapView() {
       unsubRain();
       rain3dRef.current?.dispose();
       rain3dRef.current = null;
+      debris3dRef.current?.dispose();
+      debris3dRef.current = null;
+      if (mapRef.current) disposeDeckOverlay(mapRef.current);
       mapRef.current?.remove();
       mapRef.current = null;
     };
@@ -1122,6 +1134,27 @@ export default function MapView() {
   useEffect(() => {
     rain3dRef.current?.setEnabled(layers.rain3d && map3d);
   }, [layers.rain3d, map3d, mapLoaded]);
+
+  // ---- 3D scenario playback: the engine's result as a debris flow over the terrain ----
+  useEffect(() => {
+    const d = debris3dRef.current;
+    if (!d) return;
+    const show = sim3dActive && !!simResult?.failureLikely && map3d;
+    if (!show) {
+      if (sim3dResultRef.current) {
+        sim3dResultRef.current = null;
+        d.hide();
+        rain3dRef.current?.setOverride(null);
+      }
+      return;
+    }
+    if (sim3dResultRef.current !== simResult) {
+      sim3dResultRef.current = simResult;
+      d.show(simResult);
+      rain3dRef.current?.setOverride(simResult.params.rainfallMm / Math.max(1, simResult.params.rainfallDurationH));
+    }
+    d.setTime(animTimeSec);
+  }, [sim3dActive, simResult, animTimeSec, map3d, mapLoaded]);
 
   // `assets` only feed sources at mount; referenced here so the dependency is explicit
   void assets;

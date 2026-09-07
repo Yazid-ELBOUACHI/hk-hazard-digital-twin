@@ -200,6 +200,7 @@ function ResultPanel({ slope, assessment }: { slope: Slope; assessment: RiskAsse
   const animTimeSec = useStore((s) => s.animTimeSec);
   const animSpeed = useStore((s) => s.animSpeed);
   const setAnim = useStore((s) => s.setAnim);
+  const setSim3d = useStore((s) => s.setSim3d);
   const rafRef = useRef<number>(0);
 
   // animation clock
@@ -308,6 +309,23 @@ function ResultPanel({ slope, assessment }: { slope: Slope; assessment: RiskAsse
             <option value={4}>4×</option>
           </select>
         </div>
+        {result.failureLikely ? (
+          <button
+            className="btn primary"
+            style={{ width: "100%", marginTop: 10, padding: "10px 0" }}
+            title="Play this result as a debris flow on the 3D map: real terrain and road centrelines, synthetic people and vehicles, buildings lighting up as the front reaches them"
+            onClick={() => {
+              setSim3d(true);
+              setAnim({ timeSec: 0, playing: true });
+            }}
+          >
+            🎬 Watch it in 3D on the map
+          </button>
+        ) : (
+          <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
+            Failure is unlikely in this scenario, so there is no runout to play back in 3D.
+          </div>
+        )}
       </div>
 
       <Collapsible title="All predicted outputs" storageKey="scc.scenario.outputs" summary={`${fmtInt(result.displacedVolumeM3)} m³ · ${fmtInt(result.affectedAreaM2)} m² · ${result.buildingsExposed} buildings`}>

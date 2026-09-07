@@ -305,6 +305,16 @@ export interface SimulationResult {
   isSynthetic: true;
 }
 
+/** Live tally from the 3D playback of a scenario: what the animated front has reached so far. */
+export interface Sim3dImpact {
+  buildings: number;
+  roads: number;
+  people: number;
+  vehicles: number;
+  frontM: number;
+  phase: string;
+}
+
 export interface SimulationJob {
   id: string;
   slopeId: string;

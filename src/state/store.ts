@@ -51,6 +51,8 @@ export interface LayerState {
   rain3d: boolean; // rain streaks over the terrain in 3D, driven by the displayed mm/hr
 }
 
+import type { Sim3dImpact } from "@/core/types";
+
 interface AppState {
   // clock
   gameTime: number;
@@ -94,6 +96,9 @@ interface AppState {
   animPlaying: boolean;
   animTimeSec: number;
   animSpeed: number;
+  // 3D playback of simResult on the map (illustrative presentation of the engine's result)
+  sim3dActive: boolean;
+  sim3dImpact: Sim3dImpact | null;
 
   // actions
   init(): Promise<void>;
@@ -113,6 +118,8 @@ interface AppState {
   runScenario(extraInterventions?: ScenarioParams["interventions"], forComparison?: boolean): Promise<void>;
   clearComparison(): void;
   setAnim(p: Partial<{ playing: boolean; timeSec: number; speed: number }>): void;
+  setSim3d(active: boolean): void;
+  setSim3dImpact(i: Sim3dImpact | null): void;
   flyToSlope(id: string): void;
   setMapLoaded(v: boolean): void;
   resetScenarioParams(): void;
@@ -188,6 +195,8 @@ export const useStore = create<AppState>((set, get) => ({
   animPlaying: false,
   animTimeSec: 0,
   animSpeed: 1,
+  sim3dActive: false,
+  sim3dImpact: null,
 
   async init() {
     if (initialization) return initialization;
@@ -264,6 +273,8 @@ export const useStore = create<AppState>((set, get) => ({
       comparisonResults: [],
       animPlaying: false,
       animTimeSec: 0,
+      sim3dActive: false,
+      sim3dImpact: null,
       scenarioParams: { ...DEFAULT_PARAMS },
       ...(slope ? {
         view: get().view === "emergency" ? "emergency" as const : "overview" as const,
@@ -353,6 +364,13 @@ export const useStore = create<AppState>((set, get) => ({
       animTimeSec: p.timeSec ?? st.animTimeSec,
       animSpeed: p.speed ?? st.animSpeed,
     }));
+  },
+  setSim3d(active) {
+    // the playback owns the screen: the command centre folds away and comes back on exit
+    set((st) => ({ sim3dActive: active, sim3dImpact: active ? st.sim3dImpact : null, commandCenterOpen: active ? false : st.selectedSlopeId !== null }));
+  },
+  setSim3dImpact(i) {
+    set({ sim3dImpact: i });
   },
 
   flyToSlope(id) {

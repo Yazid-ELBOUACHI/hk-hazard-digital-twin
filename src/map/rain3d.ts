@@ -2,14 +2,16 @@
 // same mm/hr the top bar shows (HKO live when available, plus the storm scenario). The drops are
 // synthetic; only the intensity is real. Nothing runs while it is dry or the view is zoomed out.
 
-import { MapboxOverlay } from "@deck.gl/mapbox";
 import { LineLayer } from "@deck.gl/layers";
 import type maplibregl from "maplibre-gl";
 import { useStore } from "@/state/store";
+import { getDeckOverlay } from "./deckOverlay";
 
 export interface Rain3d {
   setEnabled(on: boolean): void;
   setIntensity(mmHr: number): void;
+  /** Scenario playback: rain at the scenario's own intensity instead of the live/storm value (null = release). */
+  setOverride(mmHr: number | null): void;
   dispose(): void;
 }
 
@@ -19,16 +21,16 @@ const CEILING_M = 420; // spawn height above the ground under each drop
 const WIND_E_MS = 1.5;
 
 export function attachRain3d(map: maplibregl.Map): Rain3d {
-  // interleaved: drawn inside maplibre's own context — one canvas, depth-tested against buildings and terrain
-  const overlay = new MapboxOverlay({ interleaved: true, layers: [] });
-  map.addControl(overlay as unknown as maplibregl.IControl);
+  const deck = getDeckOverlay(map);
 
   const src = new Float32Array(MAX_DROPS * 3);
   const tgt = new Float32Array(MAX_DROPS * 3);
   const vel = new Float32Array(MAX_DROPS);
   const ground = new Float32Array(MAX_DROPS);
   let enabled = false;
-  let mmHr = 0;
+  let liveMmHr = 0;
+  let override: number | null = null;
+  let mmHr = 0; // effective intensity
   let count = 0;
   let raf = 0;
   let last = 0;
@@ -58,7 +60,7 @@ export function attachRain3d(map: maplibregl.Map): Rain3d {
   const clear = () => {
     if (!drawn) return;
     drawn = false;
-    overlay.setProps({ layers: [] });
+    deck.setLayers("rain3d", []);
   };
 
   const frame = (t: number) => {
@@ -85,19 +87,17 @@ export function attachRain3d(map: maplibregl.Map): Rain3d {
     }
     const alpha = 110 + Math.min(mmHr, 40) * 3;
     const light = useStore.getState().basemap === "light";
-    overlay.setProps({
-      layers: [
-        new LineLayer({
-          id: "rain3d",
-          // a fresh data object each frame is what tells deck the (in-place mutated) buffers changed
-          data: { length: count, attributes: { getSourcePosition: { value: src, size: 3 }, getTargetPosition: { value: tgt, size: 3 } } },
-          getColor: light ? [70, 100, 145, alpha] : [190, 215, 245, alpha], // must read on the pale positron basemap too
-          getWidth: 1.5,
-          widthUnits: "pixels",
-          pickable: false,
-        }),
-      ],
-    });
+    deck.setLayers("rain3d", [
+      new LineLayer({
+        id: "rain3d",
+        // a fresh data object each frame is what tells deck the (in-place mutated) buffers changed
+        data: { length: count, attributes: { getSourcePosition: { value: src, size: 3 }, getTargetPosition: { value: tgt, size: 3 } } },
+        getColor: light ? [70, 100, 145, alpha] : [190, 215, 245, alpha], // must read on the pale positron basemap too
+        getWidth: 1.5,
+        widthUnits: "pixels",
+        pickable: false,
+      }),
+    ]);
     drawn = true;
     raf = requestAnimationFrame(frame);
   };
@@ -112,33 +112,38 @@ export function attachRain3d(map: maplibregl.Map): Rain3d {
   map.on("zoomend", sync);
   document.addEventListener("visibilitychange", sync);
 
+  const apply = () => {
+    const next = Math.max(0, override ?? liveMmHr);
+    if (Math.abs(next - mmHr) < 0.05) return;
+    mmHr = next;
+    const c = mmHr <= 0 ? 0 : Math.min(MAX_DROPS, Math.max(400, Math.round(mmHr * 300)));
+    if (c > count) {
+      readBounds();
+      for (let i = count; i < c; i++) spawn(i, false);
+    }
+    count = c;
+    sync();
+  };
+
   return {
     setEnabled(on) {
       enabled = on;
       sync();
     },
     setIntensity(v) {
-      const next = Math.max(0, v);
-      if (Math.abs(next - mmHr) < 0.05) return;
-      mmHr = next;
-      const c = mmHr <= 0 ? 0 : Math.min(MAX_DROPS, Math.max(400, Math.round(mmHr * 300)));
-      if (c > count) {
-        readBounds();
-        for (let i = count; i < c; i++) spawn(i, false);
-      }
-      count = c;
-      sync();
+      liveMmHr = v;
+      apply();
+    },
+    setOverride(v) {
+      override = v;
+      apply();
     },
     dispose() {
       if (raf) cancelAnimationFrame(raf);
       raf = 0;
       map.off("zoomend", sync);
       document.removeEventListener("visibilitychange", sync);
-      try {
-        map.removeControl(overlay as unknown as maplibregl.IControl);
-      } catch {
-        /* map already removed */
-      }
+      deck.remove("rain3d");
     },
   };
 }

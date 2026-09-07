@@ -16,6 +16,8 @@ import { fetchSlopesInBbox, fetchBlackspots, fetchLandslides, fetchLpmWorks, fet
 import type { LiveRain } from "@/live/hko";
 import { setMapInteracting, yieldForMap } from "@/core/schedule";
 import { slopeCamera } from "@/core/mapSelection";
+import { rainRateAt } from "@/mock/signals";
+import type { Rain3d } from "@/map/rain3d";
 
 const DARK_STYLE_URL = "https://tiles.openfreemap.org/styles/dark";
 const LIGHT_STYLE_URL = "https://tiles.openfreemap.org/styles/positron";
@@ -661,6 +663,7 @@ export default function MapView() {
   const selectionMarkerRef = useRef<maplibregl.Marker | null>(null);
   const lastRunoutRef = useRef<{ result: typeof simResult; frame: number } | null>(null);
   const basemapRef = useRef<BasemapId>(useStore.getState().basemap);
+  const rain3dRef = useRef<Rain3d | null>(null);
 
   const slopes = useStore((s) => s.slopes);
   const assets = useStore((s) => s.assets);
@@ -694,6 +697,15 @@ export default function MapView() {
       resizeFrame = requestAnimationFrame(() => mapRef.current?.resize());
     });
     resizeObserver.observe(container);
+
+    // the 3D rain follows the same intensity the top bar shows; only re-tell it on a real change
+    let lastRain = -1;
+    const unsubRain = useStore.subscribe((s) => {
+      const rate = Math.round(rainRateAt(s.gameTime) * 10) / 10;
+      if (rate === lastRain) return;
+      lastRain = rate;
+      rain3dRef.current?.setIntensity(rate);
+    });
 
     // The dark basemap is tuned (navy water, dimmer labels) before the map is created,
     // so fetch its style JSON first; satellite is a local style object.
@@ -757,6 +769,14 @@ export default function MapView() {
       entliState.bbox = null;
       entliState.seq++;
       mountOwnLayers(map);
+      void import("@/map/rain3d").then(({ attachRain3d }) => {
+        if (cancelled || mapRef.current !== map) return;
+        const rain = attachRain3d(map);
+        rain3dRef.current = rain;
+        const s = useStore.getState();
+        rain.setEnabled(s.layers.rain3d && s.map3d);
+        rain.setIntensity(rainRateAt(s.gameTime));
+      });
 
       // interactions
       map.on("click", "slopes-fill", (e) => {
@@ -907,6 +927,9 @@ export default function MapView() {
       popupRef.current?.remove();
       loadedRef.current = false;
       useStore.getState().setMapLoaded(false);
+      unsubRain();
+      rain3dRef.current?.dispose();
+      rain3dRef.current = null;
       mapRef.current?.remove();
       mapRef.current = null;
     };
@@ -1095,6 +1118,10 @@ export default function MapView() {
     if (!map || !loadedRef.current) return;
     setSrcData(map, "live-rain", liveRainFC(liveRain));
   }, [liveRain]);
+
+  useEffect(() => {
+    rain3dRef.current?.setEnabled(layers.rain3d && map3d);
+  }, [layers.rain3d, map3d, mapLoaded]);
 
   // `assets` only feed sources at mount; referenced here so the dependency is explicit
   void assets;

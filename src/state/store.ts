@@ -48,6 +48,7 @@ export interface LayerState {
   csdiLpm: boolean; // LPMitP works programme polygons
   csdiEntli: boolean; // ENTLI natural terrain landslides (density grid far out, crowns + trails close in)
   liveRain: boolean; // HKO rain-gauge stations with the latest past-hour reading
+  rain3d: boolean; // rain streaks over the terrain in 3D, driven by the displayed mm/hr
 }
 
 interface AppState {
@@ -167,6 +168,7 @@ export const useStore = create<AppState>((set, get) => ({
     csdiLpm: false,
     csdiEntli: false,
     liveRain: false,
+    rain3d: true,
   },
   stormMode: false,
   stormHorizonH: 8,

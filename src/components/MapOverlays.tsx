@@ -12,6 +12,7 @@ const LAYER_GROUPS: { title: string; items: { key: keyof LayerState; label: stri
       { key: "slopeRisk", label: "Slope risk", hint: "Slope polygons coloured by current risk band" },
       { key: "uncertainty", label: "Uncertainty", hint: "Purple tint where model confidence is low" },
       { key: "rainfall", label: "Rainfall", hint: "Regional rainfall intensity heatmap" },
+      { key: "rain3d", label: "Rain in 3D", hint: "Rain falling over the terrain whenever the top-bar intensity is above zero — HKO live when available, plus the storm scenario. The drops are synthetic; the intensity is real." },
       { key: "floodZones", label: "Flood zones", hint: "Indicative ponding areas around drainage assets" },
     ],
   },

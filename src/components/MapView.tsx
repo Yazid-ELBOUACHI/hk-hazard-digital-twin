@@ -1156,16 +1156,22 @@ export default function MapView() {
     const d = debris3dRef.current;
     if (!d) return;
     const show = sim3dActive && !!simResult?.failureLikely && map3d;
+    const map = mapRef.current;
+    const flat2d = (visible: boolean) => {
+      for (const id of ["runout-fill", "runout-line", "runout-front-pt"]) if (map?.getLayer(id)) map.setLayoutProperty(id, "visibility", visible ? "visible" : "none");
+    };
     if (!show) {
       if (sim3dResultRef.current) {
         sim3dResultRef.current = null;
         d.hide();
         rain3dRef.current?.setOverride(null);
+        flat2d(true);
       }
       return;
     }
     if (sim3dResultRef.current !== simResult) {
       sim3dResultRef.current = simResult;
+      flat2d(false); // the flat corridor is the 2D reading of the same result; one flow on screen, not two
       d.show(simResult, slopes.find((s) => s.id === simResult.slopeId));
       rain3dRef.current?.setOverride(simResult.params.rainfallMm / Math.max(1, simResult.params.rainfallDurationH));
     } else if (animTimeSec < sim3dLastTRef.current - 1) {

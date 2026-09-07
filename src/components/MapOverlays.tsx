@@ -287,7 +287,7 @@ export default function MapOverlays() {
             3D playback <span className="tag">illustrative</span>
             {simResult && (
               <span className="sim3d-sub">
-                {simResult.params.rainfallMm} mm / {simResult.params.rainfallDurationH} h · runout {simResult.runoutDistanceM} m
+                {simResult.params.rainfallMm} mm / {simResult.params.rainfallDurationH} h{simResult.params.seismicPga > 0 ? ` · quake ${simResult.params.seismicPga} g` : ""} · runout {simResult.runoutDistanceM} m
                 {sim3dImpact ? ` · ${sim3dImpact.phase} · front ${sim3dImpact.frontM} m` : ""}
               </span>
             )}

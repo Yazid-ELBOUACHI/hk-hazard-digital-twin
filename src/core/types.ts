@@ -263,6 +263,13 @@ export interface ScenarioParams {
   existingDisplacementMm: number;
   retainingWallCondition: number; // 0..1
   barrierCondition: number; // 0..1
+  seismicPga: number; // earthquake trigger: peak ground acceleration in g (0 = none; HK design level ≈ 0.1–0.15 g)
+  // after Zhang & He (IWDTERM 2026): occurrence is driven by antecedent wetness and the storm's peak hour,
+  // mobility by entrainment along the path, and the human toll by how early people are warned
+  antecedentRain3dMm: number; // rain in the 3 days before the event (0..900)
+  peakHourlyMm: number; // peak hourly intensity within the event; >~70 mm/h flips initiation to runoff-driven channelised debris flow
+  entrainmentFactor: number; // 0..1 erodibility of the runout path (EDDA erosion/deposition): the flow grows as it travels
+  warningLeadTimeMin: number; // minutes between warning and impact; drives the evacuated fraction (0..120)
   interventions: InterventionType[]; // virtual modifications applied before run
 }
 

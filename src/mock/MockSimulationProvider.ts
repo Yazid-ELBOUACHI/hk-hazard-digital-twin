@@ -29,8 +29,32 @@ export const DEFAULT_PARAMS: ScenarioParams = {
   existingDisplacementMm: 8,
   retainingWallCondition: 0.85,
   barrierCondition: 0.85,
+  seismicPga: 0,
+  antecedentRain3dMm: 60,
+  peakHourlyMm: 40,
+  entrainmentFactor: 0.4,
+  warningLeadTimeMin: 0,
   interventions: [],
 };
+
+/**
+ * Indicative return period of a 24-h rainfall total in Hong Kong, log-interpolated through the storms in
+ * Zhang & He (IWDTERM 2026): 275 mm (1972), 623 mm (2008, ~200 y), 846 mm (7 Sep 2023, ~1000 y).
+ */
+export function returnPeriodYears(mm24: number): number {
+  const pts: [number, number][] = [[100, 2], [150, 10], [275, 50], [400, 100], [623, 200], [846, 1000], [956, 2000]];
+  if (mm24 <= pts[0][0]) return pts[0][1];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [a, ra] = pts[i], [b, rb] = pts[i + 1];
+    if (mm24 <= b) return Math.round(Math.exp(Math.log(ra) + ((mm24 - a) / (b - a)) * (Math.log(rb) - Math.log(ra))));
+  }
+  return pts[pts.length - 1][1];
+}
+
+/** Max rolling 24-h total implied by the event (uniform intensity beyond 24 h). */
+export function rolling24hMm(p: Pick<ScenarioParams, "rainfallMm" | "rainfallDurationH">): number {
+  return Math.round(p.rainfallDurationH <= 24 ? p.rainfallMm : (p.rainfallMm * 24) / p.rainfallDurationH);
+}
 
 /** Scenario library grid (mirrors a precomputed result store). */
 export const LIBRARY_RAINFALL = [50, 100, 150, 200, 250, 300, 350, 400];
@@ -49,9 +73,17 @@ const INTERVENTION_EFFECTS: Record<string, { prob: number; runout: number }> = {
 };
 
 function coreModel(slope: Slope, p: ScenarioParams): Omit<SimulationResult, "jobId" | "mode" | "frames" | "runoutPath" | "computedAt" | "isSynthetic" | "disclaimer" | "params" | "slopeId"> {
-  const rng = rngFor("sim", slope.id, p.rainfallMm, p.soilSaturationPct, p.drainageEfficiencyPct, p.groundwaterDeltaPct);
+  const rng = rngFor("sim", slope.id, p.rainfallMm, p.soilSaturationPct, p.drainageEfficiencyPct, p.groundwaterDeltaPct, p.seismicPga ?? 0);
   const rainF = clamp(p.rainfallMm / 320, 0, 1.3);
-  const satF = p.soilSaturationPct / 100;
+  // antecedent rain pre-wets the slope: the same storm on a slope that has had 300 mm in 3 days is a different storm
+  const satF = clamp(p.soilSaturationPct / 100 + ((p.antecedentRain3dMm ?? 0) / 900) * 0.25, 0, 1);
+  // peak hour: past ~70 mm/h surface runoff, not infiltration, does the work — channelised initiation (EDDA's 2nd mechanism)
+  const peakF = clamp((p.peakHourlyMm ?? 0) / 150, 0, 1.6);
+  const runoffInit = (p.peakHourlyMm ?? 0) > 70;
+  // earthquake trigger: shaking on an already-wet slope is far worse than on a dry one (pseudo-static logic)
+  const pgaF = clamp((p.seismicPga ?? 0) / 0.4, 0, 1.25);
+  const quakeDrive = pgaF * (0.16 + 0.22 * satF);
+  const ent = clamp(p.entrainmentFactor ?? 0.4, 0, 1);
   const gwF = clamp(0.5 + p.groundwaterDeltaPct / 60, 0, 1.2);
   const poreF = clamp(0.5 + p.porePressureDeltaPct / 80, 0, 1.3);
   const drainProtect = (p.drainageEfficiencyPct / 100) * 0.22;
@@ -64,7 +96,9 @@ function coreModel(slope: Slope, p: ScenarioParams): Omit<SimulationResult, "job
       satF * 0.16 +
       gwF * 0.1 +
       poreF * 0.08 +
-      dispF -
+      dispF +
+      quakeDrive +
+      (runoffInit ? 0.06 * peakF : 0) -
       drainProtect -
       vegProtect -
       (p.soilStrengthFactor - 1) * 0.5,
@@ -84,12 +118,14 @@ function coreModel(slope: Slope, p: ScenarioParams): Omit<SimulationResult, "job
 
   const failureLikely = prob > 0.5;
   const depthM = 1 + prob * 3.5;
-  const displacedVolumeM3 = Math.round(slope.areaM2 * depthM * (0.25 + prob * 0.5));
+  const sourceVolumeM3 = Math.round(slope.areaM2 * depthM * (0.25 + prob * 0.5));
   const wallHolds = p.retainingWallCondition > 0.6 && p.interventions.includes("retaining-wall-upgrade") === false ? p.retainingWallCondition : Math.max(p.retainingWallCondition, 0.8);
-  const baseRunout = slope.heightM * (1.4 + prob * 2.6) * (0.8 + rng() * 0.4);
+  // mobility: shaking liquefies the mass, a runoff-driven start is faster, and an erodible path feeds the flow as it goes
+  const baseRunout = slope.heightM * (1.4 + prob * 2.6) * (0.8 + rng() * 0.4) * (1 + pgaF * 0.35) * (1 + ent * 0.45) * (runoffInit ? 1.15 : 1);
   const barrierFactor = p.barrierCondition > 0.5 ? 1 - p.barrierCondition * 0.3 : 1;
   const runoutDistanceM = Math.round(clamp(baseRunout * runoutFactor * barrierFactor * (2 - wallHolds), 10, 900));
-  const maxVelocityMs = +(2 + prob * 16 * (runoutDistanceM / 400)).toFixed(1);
+  const displacedVolumeM3 = Math.round(sourceVolumeM3 * (1 + ent * clamp(runoutDistanceM / 300, 0, 1.5))); // entrained along the path
+  const maxVelocityMs = +((2 + prob * 16 * (runoutDistanceM / 400)) * (runoffInit ? 1 + 0.25 * peakF : 1)).toFixed(1);
   const affectedAreaM2 = Math.round(runoutDistanceM * Math.sqrt(slope.areaM2) * 0.6);
 
   const barrierCapacity = 6000 * p.barrierCondition;
@@ -101,17 +137,23 @@ function coreModel(slope: Slope, p: ScenarioParams): Omit<SimulationResult, "job
   const roadImpact: "unlikely" | "possible" | "likely" =
     !roadNearby || prob < 0.3 ? "unlikely" : prob * reach > 0.45 ? "likely" : "possible";
   const buildingsExposed = failureLikely ? Math.round(slope.nearbyAssetIds.filter((id) => !id.startsWith("RD-")).length * (2 + prob * 12) * reach) : 0;
-  const peopleExposed = Math.round(slope.populationNearby * prob * reach * 0.8);
+  // warning lead time: people who have left before the front arrives are not exposed (up to 85 % after ~45 min)
+  const evacuated = clamp((p.warningLeadTimeMin ?? 0) / 45, 0, 0.85);
+  const peopleExposed = Math.round(slope.populationNearby * prob * reach * 0.8 * (1 - evacuated));
   const drainageBlocked = p.drainageEfficiencyPct < 55 || displacedVolumeM3 > 20000;
   const downstreamFlooding: "unlikely" | "possible" | "likely" =
     prob < 0.35 ? "unlikely" : drainageBlocked && prob > 0.6 ? "likely" : "possible";
 
-  const timeToFailureH = failureLikely ? +(2 + (1 - prob) * 26).toFixed(1) : null;
+  const seismic = (p.seismicPga ?? 0) >= 0.05;
+  const timeToFailureH = failureLikely ? (seismic ? 0.1 : +(2 + (1 - prob) * 26).toFixed(1)) : null; // a quake triggers at once
 
   return {
     failureProbability: +prob.toFixed(2),
     failureLikely,
-    initiationZone: prob > 0.7 ? "Upper-middle slope face (tension crack zone)" : "Mid-slope surface layer",
+    initiationZone:
+      (runoffInit ? `Runoff-driven channelised initiation at ${p.peakHourlyMm} mm/h peak` : prob > 0.7 ? "Upper-middle slope face (tension crack zone)" : "Mid-slope surface layer") +
+      (seismic ? ` — seismically triggered at ${p.seismicPga} g` : "") +
+      (evacuated > 0 ? ` — ${Math.round(evacuated * 100)} % evacuated with ${p.warningLeadTimeMin} min warning` : ""),
     timeToFailureH,
     displacedVolumeM3,
     runoutDistanceM,
@@ -130,19 +172,22 @@ function makeFrames(slope: Slope, res: ReturnType<typeof coreModel>, p: Scenario
   const frames: SimulationFrame[] = [];
   const totalSec = 60;
   const failing = res.failureLikely || res.failureProbability > 0.35;
+  const seismic = (p.seismicPga ?? 0) >= 0.05;
+  // an earthquake cuts the slow build-up short: shaking hits at t=20 and the mass is moving within seconds
+  const tInit = seismic ? 20 : 26, tRun = seismic ? 23 : 30, tImpact = seismic ? 41 : 48, tSettled = seismic ? 50 : 56;
   for (let t = 0; t <= totalSec; t += 2) {
     let phase: SimulationFrame["phase"] = "rainfall";
     if (t >= 8) phase = "saturation";
     if (t >= 18) phase = "deformation";
-    if (failing && t >= 26) phase = "initiation";
-    if (failing && t >= 30) phase = "runout";
-    if (failing && t >= 48) phase = "impact";
-    if (failing && t >= 56) phase = "settled";
+    if (failing && t >= tInit) phase = "initiation";
+    if (failing && t >= tRun) phase = "runout";
+    if (failing && t >= tImpact) phase = "impact";
+    if (failing && t >= tSettled) phase = "settled";
     if (!failing && t >= 30) phase = "settled";
 
     const saturation = clamp(0.3 + (t / 20) * (p.soilSaturationPct / 100), 0, 0.98);
     const deformationMm = phase === "rainfall" ? 0 : clamp((t - 8) * (failing ? 4.5 : 0.8) * res.failureProbability, 0, 300);
-    const runProgress = failing ? clamp((t - 30) / 18, 0, 1) : 0;
+    const runProgress = failing ? clamp((t - tRun) / 18, 0, 1) : 0;
     // ease-out debris front
     const front = res.runoutDistanceM * (1 - Math.pow(1 - runProgress, 2.2));
     const velocity = failing && runProgress > 0 && runProgress < 1 ? res.maxVelocityMs * Math.sin(runProgress * Math.PI) : 0;
@@ -151,8 +196,8 @@ function makeFrames(slope: Slope, res: ReturnType<typeof coreModel>, p: Scenario
       rainfall: "Rainfall infiltrating slope surface",
       saturation: "Soil saturation rising; pore pressures building",
       deformation: failing ? "Shear zone deforming; displacement accelerating" : "Minor deformation; slope remains stable",
-      initiation: "Failure initiation — tension cracks open at crest",
-      runout: "Debris mass mobilized, travelling downslope",
+      initiation: seismic ? `Ground shaking (${p.seismicPga} g) — the saturated mass lets go at the crest` : "Failure initiation — tension cracks open at crest",
+      runout: seismic ? "Shaking liquefied the debris — mass travelling fast downslope" : "Debris mass mobilized, travelling downslope",
       impact: res.barrierOvertopped ? "Barrier overtopped — debris reaching infrastructure" : "Debris arrested near toe / barrier",
       settled: failing ? "Debris deposit settled; secondary hazards possible" : "Event ended without failure",
     };

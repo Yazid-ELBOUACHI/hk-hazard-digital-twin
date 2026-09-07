@@ -7,6 +7,7 @@ import { registry } from "@/core/registry";
 import { fmtInt } from "@/core/format";
 import type { InterventionOption, InterventionType, RiskAssessment, ScenarioParams, SimulationResult, Slope } from "@/core/types";
 import { SIM_DISCLAIMER } from "@/core/types";
+import { returnPeriodYears, rolling24hMm } from "@/mock/MockSimulationProvider";
 import SlopeDiagram from "./SlopeDiagram";
 import Collapsible from "../ui/Collapsible";
 
@@ -53,7 +54,12 @@ export default function ScenarioTab({ slope, assessment }: { slope: Slope; asses
     { id: "forecast", label: `Forecast next 24 h (${kpi?.forecastRainfallMm ?? 120} mm)`, hint: "Use the synthetic 24-hour forecast as the rainfall event", patch: { rainfallMm: kpi?.forecastRainfallMm ?? 120, rainfallDurationH: 24 } },
     { id: "black", label: "Black rainstorm (250 mm / 6 h)", hint: "Short, very intense event", patch: { rainfallMm: 250, rainfallDurationH: 6, soilSaturationPct: 85 } },
     { id: "extreme", label: "Extreme (500 mm / 24 h)", hint: "Stress test at the top of the range", patch: { rainfallMm: 500, rainfallDurationH: 24, soilSaturationPct: 95, groundwaterDeltaPct: 30 } },
+    { id: "sep2023", label: "7 Sep 2023 black rainstorm (846 mm / 24 h)", hint: "The record Hong Kong storm — 158 mm in one hour, 846 mm in 24 h (~1-in-1000-year), on ground already soaked by Typhoon Saola", patch: { rainfallMm: 846, rainfallDurationH: 24, peakHourlyMm: 158, antecedentRain3dMm: 200, soilSaturationPct: 90 } },
+    { id: "2040s", label: "2040s climate storm (230 mm/h peak)", hint: "The HKUST/CUHK/HKU projection of the highest hourly rainfall in the 2040s (230 mm) driving a 6-hour event", patch: { rainfallMm: 420, rainfallDurationH: 6, peakHourlyMm: 230, soilSaturationPct: 85 } },
+    { id: "quake", label: "Rainstorm + earthquake (0.25 g)", hint: "A wet slope shaken: heavy rain over 12 h, then strong ground motion (about M6 nearby — well above Hong Kong's design level)", patch: { rainfallMm: 180, rainfallDurationH: 12, soilSaturationPct: 80, seismicPga: 0.25 } },
   ];
+  const mm24 = rolling24hMm(params);
+  const retPeriod = returnPeriodYears(mm24);
 
   const applyPreset = (p: (typeof PRESETS)[number]) => {
     setParams(p.patch);
@@ -75,7 +81,7 @@ export default function ScenarioTab({ slope, assessment }: { slope: Slope; asses
         }}
       />
       <span className="val">
-        {Math.round(params[key] * 10) / 10} {unit}
+        {step < 0.1 ? params[key].toFixed(2) : Math.round(params[key] * 10) / 10} {unit}
       </span>
     </div>
   );
@@ -124,8 +130,14 @@ export default function ScenarioTab({ slope, assessment }: { slope: Slope; asses
               ↺ Reset
             </button>
           </div>
-          {P("Rainfall (event total)", "rainfallMm", 20, 500, 5, "mm", "Total rainfall over the event")}
+          {P("Rainfall (event total)", "rainfallMm", 20, 900, 5, "mm", "Total rainfall over the event (Hong Kong's record is 846 mm in 24 h, 7 Sep 2023)")}
           {P("Rainfall duration", "rainfallDurationH", 1, 72, 1, "h", "Shorter duration = higher intensity")}
+          {P("Peak hourly intensity", "peakHourlyMm", 10, 230, 5, "mm/h", "The storm's worst hour. Above ~70 mm/h surface runoff, not infiltration, starts the failure — a faster, channelised debris flow (EDDA's second initiation mechanism). Record 158 mm/h (2023); 2040s projection 230 mm/h.")}
+          {P("Antecedent rain (3 days)", "antecedentRain3dMm", 0, 900, 10, "mm", "Rain in the three days before the event: it pre-wets the slope, so the same storm does more")}
+          {P("Earthquake (peak ground accel.)", "seismicPga", 0, 0.4, 0.01, "g", "0 = no earthquake. 0.1 g is felt strongly, 0.3 g is damaging shaking; Hong Kong's design level is about 0.1–0.15 g. Shaking a saturated slope is the worst case.")}
+          <div className="row-hint" style={{ marginTop: 4 }} title="Indicative, log-interpolated through the 1972, 2008 and 2023 Hong Kong storms (Zhang & He, IWDTERM 2026)">
+            ≈ max rolling 24-h total <b style={{ fontFamily: "var(--mono)" }}>{mm24} mm</b> · return period ~<b style={{ fontFamily: "var(--mono)" }}>{retPeriod >= 1000 ? "1,000+" : retPeriod}</b> years
+          </div>
 
           <Collapsible
             title="Ground conditions"
@@ -138,6 +150,16 @@ export default function ScenarioTab({ slope, assessment }: { slope: Slope; asses
             {P("Pore pressure", "porePressureDeltaPct", -30, 80, 5, "%", "Change vs current pore-pressure proxy")}
             {P("Soil strength factor", "soilStrengthFactor", 0.5, 1.5, 0.05, "×", "Multiplier on cohesion / friction (uncertainty sweep)")}
             {P("Existing displacement", "existingDisplacementMm", 0, 150, 5, "mm", "Pre-existing cumulative movement")}
+          </Collapsible>
+
+          <Collapsible
+            title="Runout & response"
+            className="flat"
+            storageKey="scc.scenario.runout"
+            summary={`entrainment ${Math.round(params.entrainmentFactor * 100)}% · warning ${params.warningLeadTimeMin} min`}
+          >
+            {P("Path entrainment", "entrainmentFactor", 0, 1, 0.05, "", "How erodible the runout path is: the flow picks up material as it travels (EDDA erosion/deposition), so it goes further and arrives bigger")}
+            {P("Warning lead time", "warningLeadTimeMin", 0, 120, 5, "min", "Minutes between the warning and the front arriving. People who have left are not exposed — in the 3D playback they walk away from the slope")}
           </Collapsible>
 
           <Collapsible

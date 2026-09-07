@@ -102,12 +102,15 @@ const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 
 export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | null) => void, elevationAt?: ElevationAt): Debris3d {
   const deck = getDeckOverlay(map);
-  // maplibre's queryTerrainElevation is relative to the terrain under the map centre; deck's interleaved camera works
-  // in absolute metres, so add the centre elevation back or the flow sinks into the hill as the camera moves
+  // Heights are kept ABSOLUTE internally (maplibre's queryTerrainElevation is relative to the terrain under the map
+  // centre, so add that back when sampling) and converted to centre-relative at draw time, because that is the frame
+  // custom/deck layers are drawn in — cached absolute heights then stay right however the camera moves.
+  const centerElev = () => ((map as any).transform?.elevation ?? 0) as number;
   const elev: ElevationAt = elevationAt ?? ((lon, lat) => {
     const q = map.queryTerrainElevation({ lng: lon, lat });
-    return q === null ? 0 : q + ((map as any).transform?.elevation ?? 0);
+    return q === null ? 0 : q + centerElev();
   });
+  let zOff = 0; // absolute → draw frame, refreshed every frame
 
   let result: SimulationResult | null = null;
   let origin: [number, number] = [0, 0];
@@ -127,6 +130,9 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
   let buildings: Building[] = [];
   let raf = 0, last = 0;
   let lastImpact = "";
+  // earthquake: a short camera shake when the scenario's shaking hits (initiation), amplitude from the PGA
+  let shakeArmed = false, shakeUntil = 0, shakeAmp = 0;
+  let shakeBase: { lng: number; lat: number; bearing: number } | null = null;
 
   const width = (s: number) => 7 + 28 * (s / Math.max(1, path.len));
   /** Flow thickness: a shallow body that bulks up into a surge over the last 40 m before the front. */
@@ -216,6 +222,15 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
       agents.push({ kind: "person", poly: pickRoad(), s: 0, dir, speed: rnd(0.9, 1.6), lateral: (Math.random() < 0.5 ? 5.5 : -5.5) + rnd(-0.8, 0.8), color: pick(PERSON_COLORS), hit: false, pos: [0, 0, 0], yaw: 0 });
     }
     for (const a of agents) a.s = Math.random() * a.poly.len;
+    // warned in time: most people are already walking away from the slope, and quickly
+    const evacuated = Math.max(0, Math.min(0.85, (result?.params.warningLeadTimeMin ?? 0) / 45));
+    for (const a of agents) {
+      if (a.kind !== "person" || Math.random() > evacuated) continue;
+      const here = along(a.poly, a.s), ahead = along(a.poly, Math.min(a.poly.len, a.s + 5));
+      const awayFromToe = (ahead.x - here.x) * here.x + (ahead.y - here.y) * here.y > 0; // does +s lead away from the origin (toe)?
+      a.dir = awayFromToe ? 1 : -1;
+      a.speed = rnd(1.8, 2.6);
+    }
   };
 
   const placeAgent = (a: Agent) => {
@@ -232,13 +247,13 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
     const left: [number, number, number][] = [], right: [number, number, number][] = [];
     const step = Math.max(4, front / 60);
     for (let s = 0; s <= front; s += step) {
-      const p = along(path, s), w = width(s) * scale, z = pathZAt(s) + lift;
+      const p = along(path, s), w = width(s) * scale, z = pathZAt(s) + lift - zOff;
       const L = toLL(p.x - p.dy * w, p.y + p.dx * w), R = toLL(p.x + p.dy * w, p.y - p.dx * w);
       left.push([L[0], L[1], z]);
       right.push([R[0], R[1], z]);
     }
     const tip = along(path, front), tipLL = toLL(tip.x + tip.dx * width(front) * scale * 0.7, tip.y + tip.dy * width(front) * scale * 0.7);
-    return [...left, [tipLL[0], tipLL[1], pathZAt(front) + lift], ...right.reverse(), left[0]];
+    return [...left, [tipLL[0], tipLL[1], pathZAt(front) + lift - zOff], ...right.reverse(), left[0]];
   };
 
   const buildLayers = (): Layer[] => {
@@ -254,7 +269,7 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
           const s = ((d.u + tSim * 0.05) % 1) * front;
           const p = along(path, s), w = width(s) * 0.9;
           const ll = toLL(p.x - p.dy * d.v * w, p.y + p.dx * d.v * w);
-          return [ll[0], ll[1], pathZAt(s) + 0.4 + d.h * thickness(s) + 0.3 * Math.sin(tSim * 7 + d.u * 50)];
+          return [ll[0], ll[1], pathZAt(s) + 0.4 + d.h * thickness(s) + 0.3 * Math.sin(tSim * 7 + d.u * 50) - zOff];
         },
         getRadius: (d: any) => d.r,
         radiusUnits: "meters",
@@ -269,7 +284,7 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
           const s = Math.max(0, front - d.o * (1 + 0.15 * Math.sin(tSim * 9 + d.v * 20)));
           const p = along(path, s), w = width(s) * 0.95;
           const ll = toLL(p.x - p.dy * d.v * w, p.y + p.dx * d.v * w);
-          return [ll[0], ll[1], pathZAt(s) + 0.6 + d.h * 5.5 + 0.5 * Math.abs(Math.sin(tSim * 11 + d.o))];
+          return [ll[0], ll[1], pathZAt(s) + 0.6 + d.h * 5.5 + 0.5 * Math.abs(Math.sin(tSim * 11 + d.o)) - zOff];
         },
         getRadius: (d: any) => d.r,
         radiusUnits: "meters",
@@ -280,17 +295,17 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
     }
     const hitB = buildings.filter((b) => b.hit);
     if (hitB.length) {
-      layers.push(new SolidPolygonLayer({ id: "debris-hit-buildings", data: hitB, getPolygon: (b: Building) => b.ring.map(([lon, lat]) => [lon, lat, b.base] as [number, number, number]), extruded: true, getElevation: (b: Building) => b.height + 1, getFillColor: [225, 60, 50, 150], pickable: false }));
+      layers.push(new SolidPolygonLayer({ id: "debris-hit-buildings", data: hitB, getPolygon: (b: Building) => b.ring.map(([lon, lat]) => [lon, lat, b.base - zOff] as [number, number, number]), extruded: true, getElevation: (b: Building) => b.height + 1, getFillColor: [225, 60, 50, 150], updateTriggers: { getPolygon: zOff }, pickable: false }));
     }
     if (hitRoads.size) {
-      layers.push(new PathLayer({ id: "debris-hit-roads", data: [...hitRoads], getPath: (p: Poly) => p.pts.map(([x, y]) => { const ll = toLL(x, y); return [ll[0], ll[1], zAt(x, y) + 0.5] as [number, number, number]; }), getColor: [225, 60, 50, 220], getWidth: 6, widthUnits: "meters", pickable: false }));
+      layers.push(new PathLayer({ id: "debris-hit-roads", data: [...hitRoads], getPath: (p: Poly) => p.pts.map(([x, y]) => { const ll = toLL(x, y); return [ll[0], ll[1], zAt(x, y) + 0.5 - zOff] as [number, number, number]; }), getColor: [225, 60, 50, 220], getWidth: 6, widthUnits: "meters", updateTriggers: { getPath: zOff }, pickable: false }));
     }
     for (const kind of ["car", "bus", "person"] as Kind[]) {
       layers.push(new SimpleMeshLayer({
         id: `sim-${kind}`,
         data: agents.filter((a) => a.kind === kind),
         mesh: MESHES[kind] as any,
-        getPosition: (a: Agent) => a.pos,
+        getPosition: (a: Agent) => [a.pos[0], a.pos[1], a.pos[2] - zOff],
         getOrientation: (a: Agent) => (a.hit ? (a.kind === "person" ? [0, a.yaw, 85] : [18, a.yaw, 8]) : [0, a.yaw, 0]),
         getColor: (a: Agent) => (a.hit ? HIT : a.color) as [number, number, number],
         updateTriggers: { getPosition: tSim, getOrientation: tSim, getColor: tSim },
@@ -314,6 +329,7 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
     tSim += dt;
+    zOff = centerElev();
     front += (targetFront - front) * Math.min(1, dt * 3);
     for (const a of agents) {
       if (!a.hit) {
@@ -326,6 +342,15 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
     if (front > 2) {
       for (const b of buildings) if (!b.hit && b.ringM.some(([x, y]) => inFlow(x, y))) b.hit = true;
       for (const r of roads) if (!hitRoads.has(r) && r.samples.some(([x, y]) => inFlow(x, y))) hitRoads.add(r);
+    }
+    if (shakeUntil > now) {
+      if (!shakeBase) { const c = map.getCenter(); shakeBase = { lng: c.lng, lat: c.lat, bearing: map.getBearing() }; }
+      const k = (shakeUntil - now) / 1400; // fades out
+      const m = shakeAmp * k;
+      map.jumpTo({ center: [shakeBase.lng + (rnd(-m, m) / mPerLon), shakeBase.lat + rnd(-m, m) / M_PER_DEG_LAT], bearing: shakeBase.bearing + rnd(-0.6, 0.6) * k });
+    } else if (shakeBase) {
+      map.jumpTo({ center: [shakeBase.lng, shakeBase.lat], bearing: shakeBase.bearing });
+      shakeBase = null;
     }
     deck.setLayers("debris3d", buildLayers());
     report();
@@ -341,6 +366,8 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
     path = makePoly(pts.map(([lon, lat]) => toM(lon, lat)));
     pathZ = pts.map(([lon, lat]) => elev(lon, lat));
     front = 0; targetFront = 0; tSim = 0; phase = "rainfall"; lastImpact = "";
+    shakeArmed = (r.params.seismicPga ?? 0) >= 0.05; shakeUntil = 0; shakeBase = null;
+    shakeAmp = 1.2 + 6 * Math.min(1, (r.params.seismicPga ?? 0) / 0.4); // metres of camera jitter
     body = Array.from({ length: PARTICLES }, () => ({ u: Math.random(), v: rnd(-1, 1), r: rnd(0.5, 2.4), h: Math.random(), color: pick(BODY_COLORS) }));
     surge = Array.from({ length: SURGE }, () => ({ o: rnd(0, 22), v: rnd(-1, 1), r: rnd(1.2, 3.2), h: Math.random(), color: pick(SURGE_COLORS) }));
     roads = roadsNearToe();
@@ -384,6 +411,10 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
       if (!result) return;
       const f = result.frames.reduce((best, fr) => (fr.tSec <= tSec ? fr : best), result.frames[0]);
       targetFront = Math.min(path.len, f.debrisFrontM);
+      if (shakeArmed && f.phase !== "rainfall" && f.phase !== "saturation" && f.phase !== "deformation" && phase !== f.phase) {
+        shakeArmed = false;
+        shakeUntil = performance.now() + 1400;
+      }
       phase = f.phase;
       if (!raf) { last = performance.now(); raf = requestAnimationFrame(frame); }
     },

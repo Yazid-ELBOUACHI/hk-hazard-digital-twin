@@ -41,6 +41,8 @@ const SATELLITE_STYLE: StyleSpecification = {
       maxzoom: 18,
       attribution: "",
     },
+    // the same OpenMapTiles vector source the vector basemaps use, so 3D building blocks stand on the imagery too
+    openmaptiles: { type: "vector", url: "https://tiles.openfreemap.org/planet" },
   },
   layers: [
     { id: "bg", type: "background", paint: { "background-color": "#07090d" } },
@@ -97,7 +99,9 @@ function buildings3dFor(b: BasemapId): LayerSpecification {
     paint: {
       "fill-extrusion-color": light
         ? ["interpolate", ["linear"], ["coalesce", ["get", "render_height"], 12], 0, "#dfe3ea", 60, "#c6cdd8", 200, "#aab4c4"]
-        : ["interpolate", ["linear"], ["coalesce", ["get", "render_height"], 12], 0, "#232b38", 60, "#34405a", 200, "#4a5a80"],
+        : b === "satellite"
+          ? ["interpolate", ["linear"], ["coalesce", ["get", "render_height"], 12], 0, "#b9b6ae", 60, "#a8a7a3", 200, "#96999f"] // concrete over imagery
+          : ["interpolate", ["linear"], ["coalesce", ["get", "render_height"], 12], 0, "#232b38", 60, "#34405a", 200, "#4a5a80"],
       "fill-extrusion-height": ["coalesce", ["get", "render_height"], 12],
       "fill-extrusion-base": ["coalesce", ["get", "render_min_height"], 0],
       "fill-extrusion-opacity": 1, // opaque: translucent extrusions cost a second pass on every frame
@@ -630,7 +634,9 @@ function setBasemapBuildingFills(map: maplibregl.Map, visible: boolean) {
 
 function applyMapMode(map: maplibregl.Map, enabled: boolean) {
   setBasemapBuildingFills(map, !enabled);
-  map.setPixelRatio(1); // integrated GPUs: 3D terrain at 1× is the difference between 30 and 55 fps
+  // integrated GPUs: 3D terrain at 1× is the difference between 30 and 55 fps. Only touch it when it differs —
+  // setPixelRatio resizes the map, and a resize cancels whatever camera ease is in flight.
+  if (map.getPixelRatio() !== 1) map.setPixelRatio(1);
   map.setTerrain(enabled ? { source: "dem", exaggeration: 1.5 } : null);
   if (map.getLayer("hillshade")) map.setLayoutProperty("hillshade", "visibility", enabled ? "visible" : "none");
   if (map.getLayer("buildings-3d")) map.setLayoutProperty("buildings-3d", "visibility", enabled && useStore.getState().layers.buildings ? "visible" : "none");
@@ -791,7 +797,7 @@ export default function MapView() {
         const s = useStore.getState();
         if (s.sim3dActive && s.simResult?.failureLikely && s.map3d) {
           sim3dResultRef.current = s.simResult;
-          debris.show(s.simResult);
+          debris.show(s.simResult, s.slopes.find((sl) => sl.id === s.simResult!.slopeId));
           debris.setTime(s.animTimeSec);
           rain3dRef.current?.setOverride(s.simResult.params.rainfallMm / Math.max(1, s.simResult.params.rainfallDurationH));
         }
@@ -1160,7 +1166,7 @@ export default function MapView() {
     }
     if (sim3dResultRef.current !== simResult) {
       sim3dResultRef.current = simResult;
-      d.show(simResult);
+      d.show(simResult, slopes.find((s) => s.id === simResult.slopeId));
       rain3dRef.current?.setOverride(simResult.params.rainfallMm / Math.max(1, simResult.params.rainfallDurationH));
     } else if (animTimeSec < sim3dLastTRef.current - 1) {
       d.reset(); // rewind / restart: fresh people, vehicles and hit state

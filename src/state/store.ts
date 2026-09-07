@@ -135,6 +135,7 @@ let refreshSeq = 0;
 let refreshing = false;
 let initialization: Promise<void> | null = null;
 let scenarioSeq = 0;
+let basemapBeforeSim3d: BasemapId | null = null;
 let cameraSeq = 0;
 
 export const useStore = create<AppState>((set, get) => ({
@@ -366,8 +367,14 @@ export const useStore = create<AppState>((set, get) => ({
     }));
   },
   setSim3d(active) {
-    // the playback owns the screen: the command centre folds away and comes back on exit
-    set((st) => ({ sim3dActive: active, sim3dImpact: active ? st.sim3dImpact : null, commandCenterOpen: active ? false : st.selectedSlopeId !== null }));
+    // the playback owns the screen: the command centre folds away, the basemap goes to imagery (a pale
+    // vector map turns the hillside into paper), and both come back on exit
+    set((st) => {
+      if (active && !st.sim3dActive) basemapBeforeSim3d = st.basemap;
+      const basemap = active ? "satellite" : basemapBeforeSim3d ?? st.basemap;
+      if (!active) basemapBeforeSim3d = null;
+      return { sim3dActive: active, sim3dImpact: active ? st.sim3dImpact : null, commandCenterOpen: active ? false : st.selectedSlopeId !== null, basemap };
+    });
   },
   setSim3dImpact(i) {
     set({ sim3dImpact: i });

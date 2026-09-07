@@ -84,7 +84,8 @@ export default function MapOverlays() {
   const animTimeSec = useStore((s) => s.animTimeSec);
   const setAnim = useStore((s) => s.setAnim);
 
-  // the Scenario tab's playback clock unmounts with the command centre, so the 3D HUD keeps its own (same 20 Hz, 4 sim s per real s)
+  // the Scenario tab's playback clock unmounts with the command centre, so the 3D HUD keeps its own — at half the
+  // tab's pace (2 sim s per real s): the cinematic view needs the 60 s to unfold over half a minute, not 15 s
   useEffect(() => {
     if (!sim3dActive || !animPlaying) return;
     let raf = 0;
@@ -95,7 +96,7 @@ export default function MapOverlays() {
         return;
       }
       const st = useStore.getState();
-      const next = st.animTimeSec + ((now - last) / 1000) * st.animSpeed * 4;
+      const next = st.animTimeSec + ((now - last) / 1000) * st.animSpeed * 2;
       last = now;
       if (next >= 60) st.setAnim({ timeSec: 60, playing: false });
       else {
@@ -106,6 +107,12 @@ export default function MapOverlays() {
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
   }, [sim3dActive, animPlaying]);
+
+  // cinematic mode: the side panels, legend, search and banners step aside while the playback runs (styles.ux.css)
+  useEffect(() => {
+    document.body.classList.toggle("sim3d-mode", sim3dActive);
+    return () => document.body.classList.remove("sim3d-mode");
+  }, [sim3dActive]);
   const setMap3d = useStore((s) => s.setMap3d);
 
   const [q, setQ] = useState("");

@@ -18,6 +18,14 @@ const MODES = [
 
 type NumKey = Exclude<keyof ScenarioParams, "interventions">;
 
+/** Enter the 3D playback: the clock only starts once the cinematic camera move has landed. */
+function startWatch3d() {
+  const st = useStore.getState();
+  st.setSim3d(true);
+  st.setAnim({ timeSec: 0, playing: false });
+  setTimeout(() => useStore.getState().sim3dActive && useStore.getState().setAnim({ playing: true }), 3200);
+}
+
 export default function ScenarioTab({ slope, assessment }: { slope: Slope; assessment: RiskAssessment }) {
   const params = useStore((s) => s.scenarioParams);
   const setParams = useStore((s) => s.setScenarioParams);
@@ -71,6 +79,18 @@ export default function ScenarioTab({ slope, assessment }: { slope: Slope; asses
       </span>
     </div>
   );
+
+  const runAndWatch = async () => {
+    await runScenario(selectedIv);
+    // the job finishes asynchronously; wait for it, then hand the result to the 3D playback
+    for (let i = 0; i < 600; i++) {
+      const j = useStore.getState().activeJob;
+      if (j && (j.status === "done" || j.status === "failed")) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const st = useStore.getState();
+    if (st.simResult?.failureLikely) startWatch3d();
+  };
 
   const step = !result ? 1 : comparisons.length > 1 ? 3 : 2;
 
@@ -142,8 +162,17 @@ export default function ScenarioTab({ slope, assessment }: { slope: Slope; asses
             ))}
           </div>
 
-          <button className="btn primary" style={{ width: "100%", padding: "11px 0", fontSize: 13 }} disabled={running} onClick={() => void runScenario(selectedIv)}>
-            {running ? `Running — ${job?.stage}…` : result ? "▶ Re-run baseline" : "▶ Run baseline scenario"}
+          <button
+            className="btn primary"
+            style={{ width: "100%", padding: "12px 0", fontSize: 13.5 }}
+            disabled={running}
+            title="Run this storm on the slope, then play the result as a debris flow on the 3D map — real terrain and roads, synthetic people and vehicles"
+            onClick={() => void runAndWatch()}
+          >
+            {running ? `Running — ${job?.stage}…` : "🎬 Run scenario & watch it in 3D"}
+          </button>
+          <button className="btn sm" style={{ width: "100%", marginTop: 6 }} disabled={running} onClick={() => void runScenario(selectedIv)} title="Run the numbers without the 3D playback">
+            {result ? "↻ Re-run baseline (numbers only)" : "Run baseline (numbers only)"}
           </button>
           {running && (
             <div className="progress-outer">
@@ -200,7 +229,6 @@ function ResultPanel({ slope, assessment }: { slope: Slope; assessment: RiskAsse
   const animTimeSec = useStore((s) => s.animTimeSec);
   const animSpeed = useStore((s) => s.animSpeed);
   const setAnim = useStore((s) => s.setAnim);
-  const setSim3d = useStore((s) => s.setSim3d);
   const rafRef = useRef<number>(0);
 
   // animation clock
@@ -314,10 +342,7 @@ function ResultPanel({ slope, assessment }: { slope: Slope; assessment: RiskAsse
             className="btn primary"
             style={{ width: "100%", marginTop: 10, padding: "10px 0" }}
             title="Play this result as a debris flow on the 3D map: real terrain and road centrelines, synthetic people and vehicles, buildings lighting up as the front reaches them"
-            onClick={() => {
-              setSim3d(true);
-              setAnim({ timeSec: 0, playing: true });
-            }}
+            onClick={startWatch3d}
           >
             🎬 Watch it in 3D on the map
           </button>

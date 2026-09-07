@@ -48,7 +48,8 @@ export function attachRain3d(map: maplibregl.Map): Rain3d {
 
   const spawn = (i: number, fromTop: boolean) => {
     const lon = west + Math.random() * (east - west), lat = south + Math.random() * (north - south);
-    const g = map.queryTerrainElevation({ lng: lon, lat }) ?? 0;
+    const q = map.queryTerrainElevation({ lng: lon, lat });
+    const g = q === null ? 0 : q + ((map as any).transform?.elevation ?? 0); // absolute metres, like deck's camera
     const z = g + (fromTop ? CEILING_M * (0.85 + Math.random() * 0.15) : Math.random() * CEILING_M);
     const o = i * 3;
     src[o] = lon; src[o + 1] = lat; src[o + 2] = z;
@@ -72,6 +73,7 @@ export function attachRain3d(map: maplibregl.Map): Rain3d {
     const dt = Math.min((t - last) / 1000, 0.05); // a tab returning from the background must not teleport the drops
     last = t;
     readBounds();
+    if (desiredCount() !== count) recount();
     const len = streak();
     const dLonPerM = 1 / (111_320 * Math.cos((((south + north) / 2) * Math.PI) / 180));
     for (let i = 0; i < count; i++) {
@@ -85,7 +87,7 @@ export function attachRain3d(map: maplibregl.Map): Rain3d {
       src[o] = lon; tgt[o] = lon;
       src[o + 2] = z; tgt[o + 2] = z + len;
     }
-    const alpha = 110 + Math.min(mmHr, 40) * 3;
+    const alpha = 80 + Math.min(mmHr, 40) * 2.5;
     const light = useStore.getState().basemap === "light";
     deck.setLayers("rain3d", [
       new LineLayer({
@@ -112,16 +114,25 @@ export function attachRain3d(map: maplibregl.Map): Rain3d {
   map.on("zoomend", sync);
   document.addEventListener("visibilitychange", sync);
 
-  const apply = () => {
-    const next = Math.max(0, override ?? liveMmHr);
-    if (Math.abs(next - mmHr) < 0.05) return;
-    mmHr = next;
-    const c = mmHr <= 0 ? 0 : Math.min(MAX_DROPS, Math.max(400, Math.round(mmHr * 300)));
+  // drops per view: the same mm/hr must not become a solid wall at street level, so density follows the visible area
+  const desiredCount = () => {
+    if (mmHr <= 0) return 0;
+    const area = Math.pow(2, Math.min(0, 15.2 - map.getZoom()));
+    return Math.min(MAX_DROPS, Math.max(300, Math.round(mmHr * 300 * area)));
+  };
+  const recount = () => {
+    const c = desiredCount();
     if (c > count) {
       readBounds();
       for (let i = count; i < c; i++) spawn(i, false);
     }
     count = c;
+  };
+  const apply = () => {
+    const next = Math.max(0, override ?? liveMmHr);
+    if (Math.abs(next - mmHr) < 0.05) return;
+    mmHr = next;
+    recount();
     sync();
   };
 

@@ -338,3 +338,11 @@ table.data.ds td.small { font-size: 11px; color: var(--text-1); }
 .sim3d-controls input[type="range"] { flex: 1; }
 .sim3d-controls .t { font-family: var(--mono); font-size: 11px; min-width: 32px; text-align: right; }
 .sim3d-note { margin-top: 6px; font-size: 10px; color: #8d97a8; line-height: 1.4; }
+/* cinematic mode while the 3D playback runs: only the map, the HUD and the camera controls stay */
+body.sim3d-mode .main > :not(.map-wrap),
+body.sim3d-mode .map-legend,
+body.sim3d-mode .map-search,
+body.sim3d-mode .storm-banner,
+body.sim3d-mode .layer-panel { display: none !important; }
+/* with the side panels gone, the camera bar sits at the true right edge */
+body.sim3d-mode .cam-controls { right: 16px !important; }

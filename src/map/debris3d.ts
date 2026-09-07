@@ -5,7 +5,8 @@
 // through one function (`ElevationAt`) so a LiDAR mesh can replace the map DEM later.
 
 import { SolidPolygonLayer, ScatterplotLayer, PathLayer } from "@deck.gl/layers";
-import { SimpleMeshLayer } from "@deck.gl/mesh-layers";
+import { SimpleMeshLayer, ScenegraphLayer } from "@deck.gl/mesh-layers";
+import { GLTFLoader } from "@loaders.gl/gltf";
 import type { Layer } from "@deck.gl/core";
 import type maplibregl from "maplibre-gl";
 import type { SimulationResult, Sim3dImpact, Slope } from "@/core/types";
@@ -24,12 +25,15 @@ export type ElevationAt = (lon: number, lat: number) => number;
 
 const M_PER_DEG_LAT = 111_320;
 const PARTICLES = 4200; // the body of the flow
-const SURGE = 700; // the churning front
+const SURGE = 1600; // the churning front
+const BOULDERS = 140; // tumbling blocks riding the front
 const VEHICLES = 22;
 const PEOPLE = 48;
 const REACH_M = 420; // roads / buildings this far from the toe take part in the scene
 const BODY_COLORS = [[92, 64, 40], [118, 84, 52], [74, 52, 32], [140, 104, 64], [105, 74, 46]];
-const SURGE_COLORS = [[150, 112, 66], [128, 92, 55], [168, 128, 78], [112, 80, 48]];
+// wet dark mud, drier ochre crust and pale rock speckle — the mix is what reads as texture from the road
+const SURGE_COLORS = [[150, 112, 66], [128, 92, 55], [168, 128, 78], [112, 80, 48], [66, 46, 30], [58, 40, 28], [188, 160, 118], [140, 104, 64]];
+const ROCK_COLORS = [[118, 112, 104], [96, 90, 84], [136, 128, 118], [82, 74, 66]];
 const CAR_COLORS = [[225, 225, 230], [40, 40, 45], [180, 30, 35], [30, 60, 140], [200, 200, 60], [90, 90, 95]];
 const PERSON_COLORS = [[40, 70, 140], [120, 40, 40], [60, 60, 60], [30, 110, 80], [150, 110, 60], [200, 200, 210]];
 const HIT: [number, number, number] = [235, 55, 45];
@@ -58,6 +62,18 @@ function buildMesh(build: (box: (cx: number, cy: number, z0: number, sx: number,
   });
   return { positions: new Float32Array(P), normals: new Float32Array(N), texCoords: new Float32Array(T) };
 }
+const ROCK_MESH = buildMesh((box) => box(0, 0, -0.5, 1, 0.8, 1)); // unit block, centred, scaled per boulder
+
+// glTF models (Khronos glTF sample assets, served from /public/models): CesiumMan and CesiumMilkTruck © Cesium,
+// CC-BY 4.0; ToyCar CC0. sizeScale brings each to metres. deck applies no up-axis conversion, and its
+// [pitch, yaw, roll] matrix maps the model's +Y to world (…, …, cos(pitch)·sin(roll)), so a Y-up glTF stands
+// upright with roll = 90; yaw then turns it onto the heading (+x). A figure facing glTF +Z needs yaw 90 on top;
+// the truck's length runs along its own X, so it needs none.
+const MODELS: Record<Kind, { url: string; scale: number; base: [number, number, number]; animate: boolean }> = {
+  person: { url: "/models/CesiumMan.glb", scale: 1.15, base: [0, 90, 90], animate: true },
+  car: { url: "/models/ToyCar.glb", scale: 0.006, base: [0, 0, 90], animate: false },
+  bus: { url: "/models/CesiumMilkTruck.glb", scale: 1.25, base: [0, 0, 90], animate: true },
+};
 const MESHES: Record<Kind, Mesh> = {
   car: buildMesh((box) => {
     box(0, 0, 0.35, 4.4, 1.8, 0.75); // body
@@ -125,19 +141,21 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
   let front = 0, targetFront = 0, phase = "rainfall", tSim = 0;
   let body: { u: number; v: number; r: number; h: number; color: number[] }[] = [];
   let surge: { o: number; v: number; r: number; h: number; color: number[] }[] = [];
+  let boulders: { o: number; v: number; size: [number, number, number]; spin: number; rate: number; color: number[] }[] = [];
   let agents: Agent[] = [];
   let roads: Poly[] = [];
   let hitRoads = new Set<Poly>();
   let buildings: Building[] = [];
   let raf = 0, last = 0;
   let lastImpact = "";
+  let useModels = true; // falls back to the built-in low-poly shapes if a glTF fails to load
   // earthquake: a short camera shake when the scenario's shaking hits (initiation), amplitude from the PGA
   let shakeArmed = false, shakeUntil = 0, shakeAmp = 0;
   let shakeBase: { lng: number; lat: number; bearing: number } | null = null;
 
   const width = (s: number) => 7 + 28 * (s / Math.max(1, path.len));
-  /** Flow thickness: a shallow body that bulks up into a surge over the last 40 m before the front. */
-  const thickness = (s: number) => 1.2 + 3.6 * clamp01((s - (front - 40)) / 40);
+  /** Flow thickness: a shallow body that bulks up into a surge over the last 45 m before the front (a debris-flow snout). */
+  const thickness = (s: number) => 1.4 + 5.2 * Math.pow(clamp01((s - (front - 45)) / 45), 1.6);
   const pathZAt = (s: number) => {
     let i = 1;
     while (i < path.cum.length - 1 && path.cum[i] < s) i++;
@@ -257,12 +275,32 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
     return [...left, [tipLL[0], tipLL[1], pathZAt(front) + lift - zOff], ...right.reverse(), left[0]];
   };
 
+  /** The mass as a chain of quads, each extruded to the local thickness — flat body, tall snout. */
+  const massSegments = () => {
+    const segs: { polygon: [number, number, number][]; h: number; color: [number, number, number, number] }[] = [];
+    const step = Math.max(5, front / 40);
+    let prev: { L: XY; R: XY; z: number } | null = null;
+    for (let s = 0; s <= front + step * 0.5; s += step) {
+      const sc = Math.min(s, front);
+      const p = along(path, sc), w = width(sc), z = pathZAt(sc) + 0.3 - zOff;
+      const cur = { L: toLL(p.x - p.dy * w, p.y + p.dx * w), R: toLL(p.x + p.dy * w, p.y - p.dx * w), z };
+      if (prev) {
+        const h = thickness(sc);
+        const wet = clamp01((front - sc) / 60); // older, further-back material is darker and wetter
+        segs.push({ polygon: [[...prev.L, prev.z], [...cur.L, cur.z], [...cur.R, cur.z], [...prev.R, prev.z], [...prev.L, prev.z]], h, color: [96 - 20 * wet, 66 - 14 * wet, 40 - 8 * wet, 240] });
+      }
+      prev = cur;
+      if (sc >= front) break;
+    }
+    return segs;
+  };
+
   const buildLayers = (): Layer[] => {
     const layers: Layer[] = [];
     if (front > 2) {
-      // wet spread beyond the mass, then the mass itself with real thickness, then the tumbling material on top
+      // wet spread beyond the mass, then the mass itself (thick snout, thin tail), then the churn on top
       layers.push(new SolidPolygonLayer({ id: "debris-spread", data: [{ polygon: ringAt(1.45, 0.4) }], getPolygon: (d: any) => d.polygon, getFillColor: [120, 90, 55, 95], pickable: false }));
-      layers.push(new SolidPolygonLayer({ id: "debris-corridor", data: [{ polygon: ringAt(1, 0.3) }], getPolygon: (d: any) => d.polygon, extruded: true, getElevation: 2.4, getFillColor: [88, 60, 36, 240], pickable: false }));
+      layers.push(new SolidPolygonLayer({ id: "debris-corridor", data: massSegments(), getPolygon: (d: any) => d.polygon, extruded: true, getElevation: (d: any) => d.h, getFillColor: (d: any) => d.color, updateTriggers: { getElevation: front, getFillColor: front }, pickable: false }));
       layers.push(new ScatterplotLayer({
         id: "debris-particles",
         data: body,
@@ -283,14 +321,30 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
         data: surge,
         getPosition: (d: any) => {
           const s = Math.max(0, front - d.o * (1 + 0.15 * Math.sin(tSim * 9 + d.v * 20)));
-          const p = along(path, s), w = width(s) * 0.95;
+          const p = along(path, s), w = width(s) * 1.05;
           const ll = toLL(p.x - p.dy * d.v * w, p.y + p.dx * d.v * w);
-          return [ll[0], ll[1], pathZAt(s) + 0.6 + d.h * 5.5 + 0.5 * Math.abs(Math.sin(tSim * 11 + d.o)) - zOff];
+          return [ll[0], ll[1], pathZAt(s) + 0.4 + d.h * (thickness(s) + 1.5) + 0.6 * Math.abs(Math.sin(tSim * 11 + d.o)) - zOff];
         },
         getRadius: (d: any) => d.r,
         radiusUnits: "meters",
         getFillColor: (d: any) => d.color,
         updateTriggers: { getPosition: [front, tSim] },
+        pickable: false,
+      }));
+      layers.push(new SimpleMeshLayer({
+        id: "debris-boulders",
+        data: boulders,
+        mesh: ROCK_MESH as any,
+        getPosition: (d: any) => {
+          const s = Math.max(0, front - d.o);
+          const p = along(path, s), w = width(s) * 0.9;
+          const ll = toLL(p.x - p.dy * d.v * w, p.y + p.dx * d.v * w);
+          return [ll[0], ll[1], pathZAt(s) + 0.5 + thickness(s) * 0.9 + d.size[2] * 0.5 - zOff];
+        },
+        getOrientation: (d: any) => [d.spin + tSim * d.rate, d.v * 90, d.spin * 0.7 + tSim * d.rate * 0.6],
+        getScale: (d: any) => d.size,
+        getColor: (d: any) => d.color,
+        updateTriggers: { getPosition: [front, tSim], getOrientation: tSim },
         pickable: false,
       }));
     }
@@ -302,9 +356,34 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
       layers.push(new PathLayer({ id: "debris-hit-roads", data: [...hitRoads], getPath: (p: Poly) => p.pts.map(([x, y]) => { const ll = toLL(x, y); return [ll[0], ll[1], zAt(x, y) + 0.5 - zOff] as [number, number, number]; }), getColor: [225, 60, 50, 220], getWidth: 6, widthUnits: "meters", updateTriggers: { getPath: zOff }, pickable: false }));
     }
     for (const kind of ["car", "bus", "person"] as Kind[]) {
+      const data = agents.filter((a) => a.kind === kind);
+      if (useModels) {
+        // dev tuning hook: window.__models = { person: { base: [..], scale }, ... } overrides without a reload
+        const tune = (window as any).__models?.[kind] ?? {};
+        const mdl = { ...MODELS[kind], ...tune };
+        layers.push(new ScenegraphLayer({
+          id: `sim-${kind}`,
+          data,
+          scenegraph: mdl.url,
+          loaders: [GLTFLoader],
+          sizeScale: mdl.scale,
+          _lighting: "pbr",
+          _animations: mdl.animate ? { "*": { speed: 1 } } : undefined,
+          getPosition: (a: Agent) => [a.pos[0], a.pos[1], a.pos[2] - zOff],
+          getOrientation: (a: Agent) => {
+            const [bp, by, br] = mdl.base;
+            return a.hit ? (kind === "person" ? [bp + 85, by + a.yaw, br] : [bp + 18, by + a.yaw, br + 8]) : [bp, by + a.yaw, br];
+          },
+          getColor: (a: Agent) => (a.hit ? HIT : kind === "car" ? a.color : [255, 255, 255]) as [number, number, number],
+          updateTriggers: { getPosition: tSim, getOrientation: tSim, getColor: tSim },
+          onError: (err: Error) => { console.warn(`3D model for ${kind} failed, using built-in shapes:`, err.message); useModels = false; },
+          pickable: false,
+        } as any));
+        continue;
+      }
       layers.push(new SimpleMeshLayer({
         id: `sim-${kind}`,
-        data: agents.filter((a) => a.kind === kind),
+        data,
         mesh: MESHES[kind] as any,
         getPosition: (a: Agent) => [a.pos[0], a.pos[1], a.pos[2] - zOff],
         getOrientation: (a: Agent) => (a.hit ? (a.kind === "person" ? [0, a.yaw, 85] : [18, a.yaw, 8]) : [0, a.yaw, 0]),
@@ -369,7 +448,8 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
     shakeArmed = (r.params.seismicPga ?? 0) >= 0.05; shakeUntil = 0; shakeBase = null;
     shakeAmp = 1.2 + 6 * Math.min(1, (r.params.seismicPga ?? 0) / 0.4); // metres of camera jitter
     body = Array.from({ length: PARTICLES }, () => ({ u: Math.random(), v: rnd(-1, 1), r: rnd(0.5, 2.4), h: Math.random(), color: pick(BODY_COLORS) }));
-    surge = Array.from({ length: SURGE }, () => ({ o: rnd(0, 22), v: rnd(-1, 1), r: rnd(1.2, 3.2), h: Math.random(), color: pick(SURGE_COLORS) }));
+    surge = Array.from({ length: SURGE }, () => ({ o: Math.pow(Math.random(), 1.5) * 30, v: rnd(-1, 1), r: rnd(1.4, 4.2), h: Math.random(), color: pick(SURGE_COLORS) }));
+    boulders = Array.from({ length: BOULDERS }, () => ({ o: rnd(0, 28), v: rnd(-0.9, 0.9), size: [rnd(1, 3.2), rnd(0.8, 2.6), rnd(0.8, 2.4)] as [number, number, number], spin: rnd(0, 360), rate: rnd(-140, 140), color: pick(ROCK_COLORS) }));
     roads = roadsNearToe();
     hitRoads = new Set();
     buildings = buildingsNearToe();

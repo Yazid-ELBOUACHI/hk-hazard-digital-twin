@@ -60,7 +60,8 @@ export default function App() {
         <span className="credit" title="Basemap and imagery credits">
           Map ©{" "}
           <a href="https://openfreemap.org" target="_blank" rel="noreferrer">OpenFreeMap</a> ·{" "}
-          <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors · Esri imagery · Mapzen terrain
+          <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors · Esri imagery · Mapzen terrain · 3D models ©{" "}
+          <a href="https://github.com/KhronosGroup/glTF-Sample-Assets" target="_blank" rel="noreferrer">Cesium / Khronos glTF samples</a> (CC BY 4.0)
         </span>
         <button
           className="banner-link"

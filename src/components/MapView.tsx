@@ -668,6 +668,7 @@ export default function MapView() {
   const rain3dRef = useRef<Rain3d | null>(null);
   const debris3dRef = useRef<Debris3d | null>(null);
   const sim3dResultRef = useRef<SimulationResult | null>(null);
+  const sim3dLastTRef = useRef(0);
 
   const slopes = useStore((s) => s.slopes);
   const assets = useStore((s) => s.assets);
@@ -784,7 +785,16 @@ export default function MapView() {
       });
       void import("@/map/debris3d").then(({ attachDebris3d }) => {
         if (cancelled || mapRef.current !== map) return;
-        debris3dRef.current = attachDebris3d(map, (i) => useStore.getState().setSim3dImpact(i));
+        const debris = attachDebris3d(map, (i) => useStore.getState().setSim3dImpact(i));
+        debris3dRef.current = debris;
+        // a playback that was running when the map was rebuilt (basemap switch, hot reload) carries on
+        const s = useStore.getState();
+        if (s.sim3dActive && s.simResult?.failureLikely && s.map3d) {
+          sim3dResultRef.current = s.simResult;
+          debris.show(s.simResult);
+          debris.setTime(s.animTimeSec);
+          rain3dRef.current?.setOverride(s.simResult.params.rainfallMm / Math.max(1, s.simResult.params.rainfallDurationH));
+        }
       });
 
       // interactions
@@ -1152,7 +1162,10 @@ export default function MapView() {
       sim3dResultRef.current = simResult;
       d.show(simResult);
       rain3dRef.current?.setOverride(simResult.params.rainfallMm / Math.max(1, simResult.params.rainfallDurationH));
+    } else if (animTimeSec < sim3dLastTRef.current - 1) {
+      d.reset(); // rewind / restart: fresh people, vehicles and hit state
     }
+    sim3dLastTRef.current = animTimeSec;
     d.setTime(animTimeSec);
   }, [sim3dActive, simResult, animTimeSec, map3d, mapLoaded]);
 

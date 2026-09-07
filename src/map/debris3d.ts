@@ -13,6 +13,8 @@ import { getDeckOverlay } from "./deckOverlay";
 
 export interface Debris3d {
   show(result: SimulationResult): void;
+  /** Rewind: fresh people, vehicles and hit state for the same result, camera left alone. */
+  reset(): void;
   setTime(tSec: number): void;
   hide(): void;
   dispose(): void;
@@ -280,28 +282,38 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
     raf = requestAnimationFrame(frame);
   };
 
+  const initScene = (r: SimulationResult) => {
+    result = r;
+    const pts = r.runoutPath.length >= 2 ? r.runoutPath : [r.runoutPath[0] ?? [114.15, 22.28], r.runoutPath[0] ?? [114.15, 22.28]];
+    const toe = pts[pts.length - 1];
+    origin = [toe[0], toe[1]];
+    mPerLon = M_PER_DEG_LAT * Math.cos((toe[1] * Math.PI) / 180);
+    path = makePoly(pts.map(([lon, lat]) => toM(lon, lat)));
+    pathZ = pts.map(([lon, lat]) => elev(lon, lat));
+    front = 0; targetFront = 0; tSim = 0; phase = "rainfall"; lastImpact = "";
+    particles = Array.from({ length: PARTICLES }, () => ({ u: Math.random(), v: rnd(-1, 1), r: rnd(0.6, 2.1), color: pick([[120, 85, 50], [150, 110, 65], [95, 70, 45], [175, 130, 70], [130, 95, 60]]) }));
+    roads = roadsNearToe();
+    hitRoads = new Set();
+    buildings = buildingsNearToe();
+    spawnAgents();
+    if (!raf) { last = performance.now(); raf = requestAnimationFrame(frame); }
+  };
+
   return {
+    reset() {
+      if (result) initScene(result);
+    },
     show(r) {
-      result = r;
-      const pts = r.runoutPath.length >= 2 ? r.runoutPath : [r.runoutPath[0] ?? [114.15, 22.28], r.runoutPath[0] ?? [114.15, 22.28]];
-      const toe = pts[pts.length - 1];
-      origin = [toe[0], toe[1]];
-      mPerLon = M_PER_DEG_LAT * Math.cos((toe[1] * Math.PI) / 180);
-      path = makePoly(pts.map(([lon, lat]) => toM(lon, lat)));
-      pathZ = pts.map(([lon, lat]) => elev(lon, lat));
-      front = 0; targetFront = 0; tSim = 0; phase = "rainfall"; lastImpact = "";
-      particles = Array.from({ length: PARTICLES }, () => ({ u: Math.random(), v: rnd(-1, 1), r: rnd(0.6, 2.1), color: pick([[120, 85, 50], [150, 110, 65], [95, 70, 45], [175, 130, 70], [130, 95, 60]]) }));
-      roads = roadsNearToe();
-      hitRoads = new Set();
-      buildings = buildingsNearToe();
-      spawnAgents();
+      initScene(r);
       // cinematic: from just past the toe, looking up the slope
       const crown = path.pts[0];
       const d = Math.hypot(crown[0], crown[1]) || 1;
       const ux = crown[0] / d, uy = crown[1] / d;
       const center = toLL(-ux * 45, -uy * 45);
-      map.easeTo({ center, zoom: 17, pitch: 60, bearing: (Math.atan2(ux, uy) * 180) / Math.PI, duration: 2200, essential: true });
-      if (!raf) { last = performance.now(); raf = requestAnimationFrame(frame); }
+      // the command centre folds away when playback starts; that resize cancels any in-flight ease, so let the layout settle first
+      setTimeout(() => {
+        if (result === r) map.easeTo({ center, zoom: 17, pitch: 60, bearing: (Math.atan2(ux, uy) * 180) / Math.PI, duration: 2200, essential: true });
+      }, 450);
     },
     setTime(tSec) {
       if (!result) return;

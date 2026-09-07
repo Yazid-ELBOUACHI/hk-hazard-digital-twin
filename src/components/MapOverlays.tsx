@@ -83,6 +83,29 @@ export default function MapOverlays() {
   const animPlaying = useStore((s) => s.animPlaying);
   const animTimeSec = useStore((s) => s.animTimeSec);
   const setAnim = useStore((s) => s.setAnim);
+
+  // the Scenario tab's playback clock unmounts with the command centre, so the 3D HUD keeps its own (same 20 Hz, 4 sim s per real s)
+  useEffect(() => {
+    if (!sim3dActive || !animPlaying) return;
+    let raf = 0;
+    let last = performance.now();
+    const loop = (now: number) => {
+      if (now - last < 50) {
+        raf = requestAnimationFrame(loop);
+        return;
+      }
+      const st = useStore.getState();
+      const next = st.animTimeSec + ((now - last) / 1000) * st.animSpeed * 4;
+      last = now;
+      if (next >= 60) st.setAnim({ timeSec: 60, playing: false });
+      else {
+        st.setAnim({ timeSec: next });
+        raf = requestAnimationFrame(loop);
+      }
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [sim3dActive, animPlaying]);
   const setMap3d = useStore((s) => s.setMap3d);
 
   const [q, setQ] = useState("");

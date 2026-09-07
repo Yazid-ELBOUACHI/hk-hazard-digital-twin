@@ -72,12 +72,8 @@ function hillshadeFor(b: BasemapId): LayerSpecification {
   return {
     id: "hillshade",
     type: "hillshade",
-    source: "dem-hillshade", // a separate raster-dem source from terrain's "dem": sharing one source between
-    // hillshade and terrain is flagged by maplibre itself, and toggling terrain on/off (suspendTerrainForMove)
-    // while hillshade keeps compositing from the same source is a plausible trigger for maplibre's internal
-    // render task queue throwing "Attempting to run(), but is already running" — one uncaught exception there
-    // permanently wedges the renderer (every redraw after it throws immediately), which reads as the map
-    // going totally unresponsive rather than merely slow.
+    // not terrain's "dem": sharing one source while terrain is toggled per drag can wedge maplibre's render queue
+    source: "dem-hillshade",
     maxzoom: 14, // relief shading is invisible under buildings and costs a full pass per frame
     paint: light
       ? { "hillshade-exaggeration": 0.38, "hillshade-shadow-color": "#5d6878", "hillshade-highlight-color": "#ffffff", "hillshade-accent-color": "#c9d0da" }
@@ -631,36 +627,30 @@ function setBasemapBuildingFills(map: maplibregl.Map, visible: boolean) {
 function applyMapMode(map: maplibregl.Map, enabled: boolean) {
   setBasemapBuildingFills(map, !enabled);
   map.setPixelRatio(1); // integrated GPUs: 3D terrain at 1× is the difference between 30 and 55 fps
-  (map as any).__terrainSuspended = false;
   map.setTerrain(enabled ? { source: "dem", exaggeration: 1.5 } : null);
   if (map.getLayer("hillshade")) map.setLayoutProperty("hillshade", "visibility", enabled ? "visible" : "none");
   if (map.getLayer("buildings-3d")) map.setLayoutProperty("buildings-3d", "visibility", enabled && useStore.getState().layers.buildings ? "visible" : "none");
 }
 
 /**
- * Terrain drapes the *whole* style (90+ layers across basemap + twin overlays) through an extra
- * render-to-texture pass every frame — the single biggest 3D cost, and one that buys nothing while
- * the camera is mid-drag (the user is looking at motion blur, not hillside relief). Drop it for the
- * duration of a user-driven pan/zoom/rotate and restore it the instant the camera settles. Only
- * user gestures (`e.originalEvent` set) trigger this — a programmatic flyTo (e.g. jumping to a
- * selected slope) keeps full terrain quality throughout since those moves are short and the terrain
- * is the point of the shot.
+ * maplibre's render task queue (camera ease frames + input handler frames) never resets its
+ * "running" flag when a task throws, so one exception anywhere in that path makes every redraw after
+ * it throw "Attempting to run(), but is already running" — the map goes black and stays black.
+ * Wrap each queued task so a throw is logged with its stack and the queue keeps running.
  */
-function suspendTerrainForMove(map: maplibregl.Map, suspend: boolean) {
-  if (!useStore.getState().map3d) return;
-  // deferred to next frame: mutating terrain synchronously inside the movestart/moveend dispatch
-  // corrupts maplibre's internal handler state (same class of bug as changing pixelRatio on movestart —
-  // the drag simply stops responding afterwards)
-  if (suspend) {
-    if (!map.getTerrain() || (map as any).__terrainSuspended) return;
-    (map as any).__terrainSuspended = true;
-    requestAnimationFrame(() => {
-      if ((map as any).__terrainSuspended) map.setTerrain(null);
+function armRenderQueueRecovery(map: maplibregl.Map) {
+  const queue = (map as any)._renderTaskQueue;
+  if (!queue || queue.__recoveryArmed) return;
+  queue.__recoveryArmed = true;
+  const add = queue.add.bind(queue);
+  queue.add = (task: (ts: number) => void) =>
+    add((ts: number) => {
+      try {
+        task(ts);
+      } catch (err) {
+        console.error("map render task threw (recovered, frame dropped):", err);
+      }
     });
-  } else if ((map as any).__terrainSuspended) {
-    (map as any).__terrainSuspended = false;
-    requestAnimationFrame(() => map.setTerrain({ source: "dem", exaggeration: 1.5 }));
-  }
 }
 
 export default function MapView() {
@@ -701,16 +691,7 @@ export default function MapView() {
     let resizeFrame = 0;
     const resizeObserver = new ResizeObserver(() => {
       cancelAnimationFrame(resizeFrame);
-      resizeFrame = requestAnimationFrame(() => {
-        try {
-          mapRef.current?.resize();
-        } catch (err) {
-          // maplibre's internal render task queue permanently wedges itself if any queued task throws
-          // ("Attempting to run(), but is already running" on every redraw after) — surfacing this instead
-          // of letting it go uncaught at least keeps it from taking down unrelated code on the same tick
-          console.error("map resize failed:", err);
-        }
-      });
+      resizeFrame = requestAnimationFrame(() => mapRef.current?.resize());
     });
     resizeObserver.observe(container);
 
@@ -749,22 +730,21 @@ export default function MapView() {
       });
       mapRef.current = map;
       (window as any).__twinMap = map; // dev diagnostics (Data Sources / console)
+      armRenderQueueRecovery(map);
       map.on("error", (e) => console.error("maplibre:", (e as any)?.error ?? e));
       wireMap(map);
     });
 
     const wireMap = (map: maplibregl.Map) => {
-    map.on("movestart", (e) => {
+    map.on("movestart", () => {
       setMapInteracting(true);
       clearTimeout(viewportTimer);
       popupRef.current?.remove();
       container.closest(".main")?.classList.add("map-moving");
-      if (e.originalEvent) suspendTerrainForMove(map, true); // user drag/scroll/rotate only, not flyTo
     });
     map.on("moveend", () => {
       setMapInteracting(false);
       container.closest(".main")?.classList.remove("map-moving");
-      suspendTerrainForMove(map, false);
     });
     // some vendor style layers reference sprite patterns we do not ship; provide a blank pixel instead of a warning
     map.on("styleimagemissing", (e) => {

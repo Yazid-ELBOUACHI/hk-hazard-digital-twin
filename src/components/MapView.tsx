@@ -54,7 +54,7 @@ const DEM_TILES = ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/
 
 /** Layers that belong to the twin (kept across basemap switches). */
 const OWN_SOURCE_IDS = [
-  "dem", "slopes", "slopes-blobs", "slopes-pts", "roads", "buildings", "drainage", "incidents", "sensors", "mitigated", "historical", "rainfall-pts", "flood",
+  "dem", "dem-hillshade", "slopes", "slopes-blobs", "slopes-pts", "roads", "buildings", "drainage", "incidents", "sensors", "mitigated", "historical", "rainfall-pts", "flood",
   "runout", "runout-front", "selected", "csdi-slopes", "csdi-blackspots", "csdi-landslides",
   "csdi-lpm", "csdi-lpm-pts", "entli-grid", "csdi-entli-crowns", "csdi-entli-trails", "live-rain", "csdi-roads", "facilities-local", "building-blocks",
 ];
@@ -72,7 +72,12 @@ function hillshadeFor(b: BasemapId): LayerSpecification {
   return {
     id: "hillshade",
     type: "hillshade",
-    source: "dem",
+    source: "dem-hillshade", // a separate raster-dem source from terrain's "dem": sharing one source between
+    // hillshade and terrain is flagged by maplibre itself, and toggling terrain on/off (suspendTerrainForMove)
+    // while hillshade keeps compositing from the same source is a plausible trigger for maplibre's internal
+    // render task queue throwing "Attempting to run(), but is already running" — one uncaught exception there
+    // permanently wedges the renderer (every redraw after it throws immediately), which reads as the map
+    // going totally unresponsive rather than merely slow.
     maxzoom: 14, // relief shading is invisible under buildings and costs a full pass per frame
     paint: light
       ? { "hillshade-exaggeration": 0.38, "hillshade-shadow-color": "#5d6878", "hillshade-highlight-color": "#ffffff", "hillshade-accent-color": "#c9d0da" }
@@ -333,6 +338,7 @@ function mountOwnLayers(map: maplibregl.Map) {
   const st = useStore.getState();
 
   map.addSource("dem", { type: "raster-dem", tiles: DEM_TILES, encoding: "terrarium", tileSize: 256, maxzoom: 13 });
+  map.addSource("dem-hillshade", { type: "raster-dem", tiles: DEM_TILES, encoding: "terrarium", tileSize: 256, maxzoom: 13 });
   if (st.map3d) map.setTerrain({ source: "dem", exaggeration: 1.5 });
 
   // basemap-relative anchors: relief and 3D buildings sit under labels
@@ -695,7 +701,16 @@ export default function MapView() {
     let resizeFrame = 0;
     const resizeObserver = new ResizeObserver(() => {
       cancelAnimationFrame(resizeFrame);
-      resizeFrame = requestAnimationFrame(() => mapRef.current?.resize());
+      resizeFrame = requestAnimationFrame(() => {
+        try {
+          mapRef.current?.resize();
+        } catch (err) {
+          // maplibre's internal render task queue permanently wedges itself if any queued task throws
+          // ("Attempting to run(), but is already running" on every redraw after) — surfacing this instead
+          // of letting it go uncaught at least keeps it from taking down unrelated code on the same tick
+          console.error("map resize failed:", err);
+        }
+      });
     });
     resizeObserver.observe(container);
 
@@ -721,6 +736,11 @@ export default function MapView() {
         bearing: -24,
         maxPitch: 62, // beyond this the horizon pulls in far more terrain-draped tiles than the view is worth
         maxZoom: 17.5, // beyond this the camera dips under the exaggerated terrain and the frame goes black
+        minZoom: 9, // this is a Hong Kong twin, not a world map — never let the view (or an accidental scroll) leave the territory
+        maxBounds: [
+          [113.7, 22.05],
+          [114.55, 22.65],
+        ], // HK territory + a margin; keeps every pan/tile-load inside the one region this app has data for
         pixelRatio: 1,
         renderWorldCopies: false,
         fadeDuration: 0,

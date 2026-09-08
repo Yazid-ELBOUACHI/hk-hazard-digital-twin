@@ -4,9 +4,10 @@
 
 import { useEffect, useState } from "react";
 import { useStore } from "@/state/store";
-import { CSDI_PORTAL, DATA_SOURCES, type Connection, type DataSource, type Realness, type SourceGroup, type SourceStatus } from "@/core/dataSources";
+import { CALCULATIONS, CSDI_PORTAL, DATA_SOURCES, type CalcGroup, type Connection, type DataSource, type Realness, type SourceGroup, type SourceStatus } from "@/core/dataSources";
 
 const GROUPS: SourceGroup[] = ["Slopes & landslides", "Rainfall & weather", "Exposure & people", "Geography & basemap", "Synthetic twin state"];
+const CALC_GROUPS: CalcGroup[] = ["Hazard & risk — the PoLA chain", "Rainfall", "Slope baseline & monitoring signals", "Exposure & consequence", "Scenario engine & 3D playback", "Planning, KPIs & reports"];
 
 const CONN: Record<Connection, { label: string; hint: string }> = {
   "live-api": { label: "Live API", hint: "The browser queries the publisher's API directly (CSDI ArcGIS REST, CORS-open)" },
@@ -116,7 +117,7 @@ export default function DataSourcesPane() {
                 </thead>
                 <tbody>
                   {rows.map((d) => (
-                    <tr key={d.id}>
+                    <tr key={d.id} id={d.id}>
                       <td className="name">
                         <b>{d.name}</b>
                         <span className="prov">{d.provider}</span>
@@ -148,9 +149,68 @@ export default function DataSourcesPane() {
       })}
 
       <div className="row-hint">
-        Real values carry <code>isSynthetic: false</code> provenance through the same pipeline as synthetic ones; the risk score itself remains a demonstration model. Baked datasets are refreshed with{" "}
+        Real values carry <code>isSynthetic: false</code> provenance through the same pipeline as synthetic ones. Baked datasets are refreshed with{" "}
         <code>npm run bake:live</code>; the bake date is shown in the Freshness column.
       </div>
+
+      <h1 style={{ marginTop: 28 }}>How it is calculated</h1>
+      <div className="sub">
+        Every number the twin derives, with its inputs, arithmetic and coefficients. The slope risk follows the PoLA chain of Prof. Limin Zhang's group at HKUST —
+        Risk = P(H|R) · P(M|H,R) · P(L|H,M) · V · E — with the published Hong Kong correlations and QRA factors; terms the open data cannot supply are marked synthetic.
+        Generated from <code>CALCULATIONS</code> in <code>src/core/dataSources.ts</code>.
+      </div>
+
+      {CALC_GROUPS.map((g) => {
+        const rows = CALCULATIONS.filter((c) => c.group === g);
+        if (!rows.length) return null;
+        return (
+          <div className="ds-group card" key={g}>
+            <h3>{g}</h3>
+            <div style={{ overflowX: "auto" }}>
+              <table className="data ds">
+                <thead>
+                  <tr>
+                    <th style={{ width: "17%" }}>Quantity</th>
+                    <th style={{ width: "18%" }}>Inputs</th>
+                    <th style={{ width: "43%" }}>How it is calculated</th>
+                    <th style={{ width: "10%" }}>Result</th>
+                    <th style={{ width: "12%" }}>Reference · code</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((c) => (
+                    <tr key={c.id} id={c.id}>
+                      <td className="name">
+                        <b>{c.name}</b>
+                        <span className="prov">{c.output}</span>
+                      </td>
+                      <td className="what">
+                        <ul style={{ margin: 0, paddingLeft: 16 }}>
+                          {c.inputs.map((x, i) => (
+                            <li key={i}>{x}</li>
+                          ))}
+                        </ul>
+                      </td>
+                      <td className="what">
+                        {c.how.map((x, i) => (
+                          <div key={i} style={{ marginBottom: 4 }}>{x}</div>
+                        ))}
+                      </td>
+                      <td>
+                        <span className={`badge ${REAL[c.realness].cls}`} title={REAL[c.realness].hint}>{REAL[c.realness].label}</span>
+                      </td>
+                      <td className="small">
+                        {c.reference && <div>{c.reference}</div>}
+                        <div className="muted" style={{ fontFamily: "var(--mono)", fontSize: 10 }}>{c.code}</div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }

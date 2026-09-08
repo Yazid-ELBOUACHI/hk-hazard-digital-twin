@@ -24,12 +24,16 @@ export type MitigationType =
   | "debris-barrier"
   | "surface-drainage"
   | "shotcrete"
-  | "rock-mesh";
+  | "rock-mesh"
+  | "natural-terrain-stabilisation"; // CEDD "NS" feature: nails, buttresses or drains on a natural hillside
 
 export interface Mitigation {
   type: MitigationType;
-  installedYear: number;
-  condition: number; // 0..1
+  installedYear: number; // 0 = not published
+  condition: number; // 0..1 (synthetic — no open dataset publishes barrier condition)
+  real?: boolean; // the measure itself is a CEDD-registered feature (Catalogue of Slopes ND / NS)
+  ref?: string; // its CEDD feature number, e.g. "11NE-A/ND 3"
+  note?: string; // published facts: footprint length, maintenance party
 }
 
 export type SensorKind =
@@ -234,10 +238,29 @@ export interface TrajectoryPoint {
   category: RiskCategory;
 }
 
+/** The quantitative risk chain behind a score — PoLA (He, Zhang et al. 2023; Zhang & He, IWDTERM 2026), see src/core/pola.ts. */
+export interface QraSummary {
+  r24Mm: number; // maximum rolling 24-h rainfall at the slope over the trailing day
+  returnPeriodY: number; // indicative return period of that rainfall
+  pFailure: number; // P(H | R): per-storm failure probability
+  pFailureBaseline: number; // the statistical correlation alone, for this feature type
+  pMajor: number; // per-storm probability of a failure ≥ 50 m³
+  magnitude: { cls: string; label: string; volumeM3: number; p: number }[]; // P(M_j | H, R)
+  consequencePerClass: number[]; // expected fatalities given a landslide of each class (mobility × vulnerability × elements)
+  pllEvent: number; // expected fatalities in this storm (societal risk per event)
+  irEvent: number; // individual risk of the most exposed resident, this storm
+  irAnnual: number; // irEvent / return period — indicative, for comparison with HK criteria (1e-4 existing, 1e-5 new)
+  mostExposedM: number | null; // distance of the most exposed person
+  elements: { residents: number; buildings: number; facilities: number; roads: number };
+  hazardIdx: number; // 0..1 log map of pFailure
+  consIdx: number; // 0..1 log map of pllEvent
+}
+
 export interface RiskAssessment {
   slopeId: string;
   score: number; // 0..100
   category: RiskCategory;
+  qra?: QraSummary;
   confidence: number; // 0..1
   trend: Trend;
   drivers: RiskDriver[];
@@ -305,6 +328,7 @@ export interface SimulationResult {
   barrierOvertopped: boolean;
   downstreamFlooding: "unlikely" | "possible" | "likely";
   confidence: number;
+  polaFailureProbability?: number; // per-storm P(H | R) of the same event from the PoLA occurrence model (src/core/pola.ts)
   frames: SimulationFrame[];
   runoutPath: [number, number][]; // for map animation
   disclaimer: string;
@@ -318,6 +342,8 @@ export interface Sim3dImpact {
   roads: number;
   people: number;
   vehicles: number;
+  barriers: number; // real CEDD defence measures (ND) the front has reached
+  barriersInScene: number;
   frontM: number;
   phase: string;
 }
@@ -400,6 +426,8 @@ export interface KpiSnapshot {
   sensorsAnomalous: number;
   sensorsOffline: number;
   simulationsRunning: number;
+  expectedLandslides?: number; // Σ P(H | R) over the inventory — landslides expected in the current storm
+  pllEvent?: number; // Σ expected fatalities over the inventory in the current storm
   trends: Record<string, Trend>;
 }
 

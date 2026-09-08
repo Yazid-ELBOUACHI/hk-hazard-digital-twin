@@ -3,7 +3,7 @@
 // synthetic is derived in this script.
 //
 //   node scripts/build-live-data.mjs            # bake everything
-//   node scripts/build-live-data.mjs rain entli # bake a subset (census | rain | entli | hko | facilities | assets)
+//   node scripts/build-live-data.mjs rain entli # bake a subset (census | rain | entli | hko | facilities | assets | barriers)
 //
 // Outputs (all GENERATED, do not edit):
 //   src/live/baked/census.ts          2021 Population Census small-TPU polygons: population, age bands, households
@@ -17,6 +17,9 @@
 //                                     police stations, DH clinics (point, name, address)
 //   src/live/baked/slopeAssets.ts     Per registered slope: LandsD building blocks within 150 m and the nearest
 //                                     LandsD road centreline (name, type, distance, a short segment)
+//   src/live/baked/barriers.ts        CEDD natural terrain hazard mitigation measures: every ND (defence: debris-
+//                                     resisting barriers, check dams, bunds, boulder fences) and NS (stabilisation)
+//                                     feature in the Catalogue of Slopes, with footprint, long axis and nearby slopes
 //
 // Raw downloads are cached in scripts/.cache/ (gitignored) so re-runs are fast.
 
@@ -580,6 +583,96 @@ export interface SlopeAssets { n: number; b: NearBuilding[]; r?: NearRoad }`,
   return { slopes: n, withBuildings: withB, withRoad: withR, buildings: buildings.length, roadSegments: roads.length };
 }
 
+// ---------- 7. Natural terrain hazard mitigation measures: ND defence + NS stabilisation features (REAL) ----------
+//
+// GEO registers natural-terrain mitigation works in the same Catalogue of Slopes as cut/fill slopes. The slope
+// number carries the class: ".../ND n" = defence measures that resist or contain landslide debris and boulders
+// (check dams = rigid barriers, flexible barriers, earth bunds, boulder fences — DEVB TC(W) 02/2018), ".../NS n" =
+// stabilisation measures on natural hillsides (soil nails, buttresses, raking drains). The open layer publishes the
+// footprint, location and maintenance party but NOT the barrier type, height or design retention volume.
+
+/** Principal axis of a ring (metres, from its centroid): direction and the extent along / across it. */
+function principalAxis(ringM) {
+  const n = ringM.length;
+  let cx = 0, cy = 0;
+  for (const [x, y] of ringM) { cx += x; cy += y; }
+  cx /= n; cy /= n;
+  let sxx = 0, syy = 0, sxy = 0;
+  for (const [x, y] of ringM) { const dx = x - cx, dy = y - cy; sxx += dx * dx; syy += dy * dy; sxy += dx * dy; }
+  const theta = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+  const ux = Math.cos(theta), uy = Math.sin(theta);
+  let lo = Infinity, hi = -Infinity, wlo = Infinity, whi = -Infinity;
+  for (const [x, y] of ringM) {
+    const t = (x - cx) * ux + (y - cy) * uy, w = -(x - cx) * uy + (y - cy) * ux;
+    lo = Math.min(lo, t); hi = Math.max(hi, t); wlo = Math.min(wlo, w); whi = Math.max(whi, w);
+  }
+  return { cx, cy, ux, uy, lo, hi, lengthM: hi - lo, widthM: whi - wlo };
+}
+
+async function bakeBarriers() {
+  console.log("Natural terrain hazard mitigation measures (CEDD Catalogue of Slopes, ND + NS)");
+  const g = await cached("ntmm", () =>
+    pageAll(LAYER.slopes, {
+      where: "SLOPE_NO LIKE '%/ND%' OR SLOPE_NO LIKE '%/NS%'",
+      outFields: "SLOPE_NO,DISTRICT,LOCATION,MAINT_PART,Shape_Area",
+      maxAllowableOffset: "0.00002", // ≈ 2 m: barrier footprints are strips a few metres wide
+      f: "geojson",
+    }, "ND/NS features")
+  );
+  const slopes = await cached("inventoryCentroids", async () => Object.fromEntries(await fetchInventoryCentroids()));
+  const sIndex = new Map();
+  for (const [key, s] of Object.entries(slopes)) { const k = cellKey(s.c[0], s.c[1]); (sIndex.get(k) ?? sIndex.set(k, []).get(k)).push(key); }
+
+  const out = [];
+  let linked = 0;
+  for (const f of g) {
+    const ring = f.geometry?.type === "Polygon" ? f.geometry.coordinates[0] : f.geometry?.type === "MultiPolygon" ? f.geometry.coordinates.map((p) => p[0]).sort((a, b) => b.length - a.length)[0] : null;
+    if (!ring || ring.length < 4) continue;
+    const p = f.properties;
+    const id = tidy(p.SLOPE_NO);
+    const cls = /\/ND/.test(id) ? "ND" : "NS";
+    const c = ringCentroid(f.geometry);
+    const kx = mPerDegLon(c[1]);
+    const ringM = ring.map(([x, y]) => [(x - c[0]) * kx, (y - c[1]) * M_PER_DEG_LAT]);
+    const ax = principalAxis(ringM);
+    const toLL = (t) => [r5(c[0] + (ax.cx + ax.ux * t) / kx), r5(c[1] + (ax.cy + ax.uy * t) / M_PER_DEG_LAT)];
+    // inventory slopes within 200 m of the measure — the slopes whose runout it is there to catch
+    const near = [];
+    for (const key of neighbours(sIndex, c[0], c[1])) { const d = distM(c, slopes[key].c); if (d <= 200) near.push([Math.round(d), slopes[key].id]); }
+    near.sort((a, b) => a[0] - b[0]);
+    if (near.length) linked++;
+    out.push({
+      id, cls, district: tidy(p.DISTRICT), loc: tidy(p.LOCATION), maint: tidy(p.MAINT_PART),
+      lon: r5(c[0]), lat: r5(c[1]), areaM2: Math.round(p.Shape_Area ?? 0),
+      lengthM: Math.round(ax.lengthM), widthM: Math.round(ax.widthM * 10) / 10,
+      axis: [toLL(ax.lo), toLL(ax.hi)],
+      ring: ring.map(([x, y]) => [r5(x), r5(y)]),
+      slopes: near.slice(0, 6).map(([d, sid]) => [tidy(sid), d]),
+    });
+  }
+  const nd = out.filter((b) => b.cls === "ND").length, ns = out.length - nd;
+  const linkedSlopes = new Set(out.flatMap((b) => b.slopes.map(([sid]) => sid))).size;
+  console.log(`  ${nd} ND defence measures · ${ns} NS stabilisation measures · ${linked} within 200 m of an inventory slope (${linkedSlopes} slopes)`);
+  writeTs(
+    "barriers.ts",
+    `// REAL natural terrain hazard mitigation measures from CEDD's Catalogue of Slopes (CSDI): ${nd} ND defence
+// measures (debris-resisting barriers — rigid check dams and flexible nets — earth bunds, boulder fences) and ${ns} NS
+// stabilisation measures (soil nails, buttresses, raking drains on natural hillsides). The published layer gives the
+// footprint polygon, location text and maintenance party only: barrier type, height and design retention volume are
+// NOT open data. \`axis\` is the footprint's principal axis (the barrier alignment), \`slopes\` the inventory slopes
+// within 200 m as [slope number, distance m].
+
+export type BarrierClass = "ND" | "NS";
+export interface Barrier {
+  id: string; cls: BarrierClass; district: string; loc: string; maint: string;
+  lon: number; lat: number; areaM2: number; lengthM: number; widthM: number;
+  axis: [[number, number], [number, number]]; ring: [number, number][]; slopes: [string, number][];
+}`,
+    `export const BARRIERS: Barrier[] = JSON.parse(${JSON.stringify(JSON.stringify(out))});`
+  );
+  return { nd, ns, linked, linkedSlopes };
+}
+
 // ---------- manifest (what was baked, when — shown in the Data Sources panel) ----------
 
 const MANIFEST = path.join(OUT, "manifest.json");
@@ -595,6 +688,7 @@ if (want("entli")) note("entli", await bakeEntli());
 if (want("hko")) note("hko", await bakeHko());
 if (want("facilities")) note("facilities", await bakeFacilities());
 if (want("assets")) note("assets", await bakeSlopeAssets());
+if (want("barriers")) note("barriers", await bakeBarriers());
 fs.writeFileSync(MANIFEST, JSON.stringify(manifest, null, 2) + "\n");
 console.log(`manifest → ${path.relative(ROOT, MANIFEST)}`);
 console.log(`done in ${((Date.now() - t0) / 1000).toFixed(0)} s`);

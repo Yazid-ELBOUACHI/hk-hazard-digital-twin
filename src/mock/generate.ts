@@ -23,6 +23,7 @@ import { clamp, pick, range, rangeInt, rngFor } from "./random";
 import { fetchRealSlopeShells, RealSlopeShell, fetchLpmWorks, LpmWork, LpmWorks, normSlopeNo, quarterLabelToIso } from "@/live/csdi";
 import { reportSource } from "@/core/dataSources";
 import { buildRealAssets, loadRealAssets, type RealAssetData } from "@/live/realAssets";
+import { loadRealBarriers, type Barrier } from "@/live/realBarriers";
 import { RAIN_GAUGES } from "@/live/baked/gauges";
 import { u16 } from "@/live/baked/decode";
 import type { CensusUnit } from "@/live/baked/census";
@@ -184,11 +185,13 @@ let entli: { g: EntliGrid; k: Map<number, number>; recent: Uint16Array; relict: 
 let slopeIncidents: Record<string, SlopeIncidentRow[]> = {};
 let incidentsLoaded = false; // once real incident records are in, no synthetic incidents are invented
 let realAssetData: RealAssetData | null = null; // facilities + per-slope buildings/roads (LandsD, HA, EDB, FSD, HKPF, DH)
+let barriersBySlope: Map<string, Barrier[]> | null = null; // CEDD ND / NS natural terrain mitigation measures within 200 m of a slope
 
 /** Baked real context (census, ENTLI grid, per-slope incidents) — separate chunks, loaded in parallel with the inventory. */
 async function loadBakedContext(): Promise<void> {
-  const [c, e, i, ra] = await Promise.all([import("@/live/baked/census"), import("@/live/baked/entliGrid"), import("@/live/baked/slopeIncidents"), loadRealAssets()]);
+  const [c, e, i, ra, rb] = await Promise.all([import("@/live/baked/census"), import("@/live/baked/entliGrid"), import("@/live/baked/slopeIncidents"), loadRealAssets(), loadRealBarriers()]);
   realAssetData = ra;
+  barriersBySlope = rb?.bySlope ?? null;
   censusUnits = c.CENSUS_UNITS;
   const g = e.ENTLI_GRID;
   const cells = u16(g.cells);
@@ -406,7 +409,7 @@ function slopesFromShells(shells: RealSlopeShell[], assets: Asset[], nearbyReal?
         lastCleared: isoDaysAgo(rangeInt(rng, 20, 700)),
       },
       vegetationCover: range(rng, 0.05, 0.95),
-      mitigations: makeMitigations(rng, susceptibility),
+      mitigations: makeMitigations(rng, susceptibility, barriersBySlope ? (barriersBySlope.get(normSlopeNo(shell.id)) ?? []) : null),
       nearbyAssetIds: nearby.map((a) => a.id),
       sensors: makeSensors(shell.id, rng, instrumented),
       history: [...makeHistory(rng, susceptibility, !incidentsLoaded), ...ctx.events].sort((a, b) => a.date.localeCompare(b.date)),
@@ -513,15 +516,31 @@ function makePolygon(centroid: [number, number], aspectDeg: number, areaM2: numb
   return pts;
 }
 
-function makeMitigations(rng: () => number, susceptibility: number): Mitigation[] {
+function makeMitigations(rng: () => number, susceptibility: number, realBarriers: Barrier[] | null = null): Mitigation[] {
   const out: Mitigation[] = [];
-  const candidates: MitigationType[] = ["soil-nails", "retaining-wall", "debris-barrier", "surface-drainage", "shotcrete", "rock-mesh"];
+  // once the real CEDD register of debris barriers is loaded, no synthetic barriers are invented
+  const candidates: MitigationType[] = realBarriers
+    ? ["soil-nails", "retaining-wall", "surface-drainage", "shotcrete", "rock-mesh"]
+    : ["soil-nails", "retaining-wall", "debris-barrier", "surface-drainage", "shotcrete", "rock-mesh"];
   const count = rng() < 0.25 ? 0 : rangeInt(rng, 1, susceptibility > 0.6 ? 3 : 2);
   for (let i = 0; i < count; i++) {
     out.push({
       type: pick(rng, candidates),
       installedYear: rangeInt(rng, 1998, 2025),
       condition: clamp(range(rng, 0.45, 1), 0, 1),
+    });
+  }
+  // REAL: CEDD-registered natural terrain hazard mitigation measures within 200 m (Catalogue of Slopes ND / NS).
+  // Their existence, footprint and maintainer are published; year and condition are not, so condition stays synthetic.
+  for (const b of realBarriers ?? []) {
+    const d = b.slopes.find(([sid]) => sid)?.[1];
+    out.push({
+      type: b.cls === "ND" ? "debris-barrier" : "natural-terrain-stabilisation",
+      installedYear: 0,
+      condition: clamp(range(rng, 0.65, 1), 0, 1),
+      real: true,
+      ref: b.id,
+      note: `${b.cls === "ND" ? "Defence measure" : "Stabilisation measure"} · footprint ${b.lengthM} m × ${b.widthM} m · maintained by ${b.maint || "—"}${d !== undefined ? ` · ${d} m from this slope` : ""}`,
     });
   }
   return out;

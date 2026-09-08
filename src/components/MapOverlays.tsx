@@ -38,6 +38,7 @@ const LAYER_GROUPS: { title: string; items: { key: keyof LayerState; label: stri
     items: [
       { key: "csdiSlopes", label: "Registered slopes", hint: "REAL DATA — CEDD Catalogue of Slopes (61,000+ registered man-made slopes). Zoom in to load the polygons around your view." },
       { key: "csdiLpm", label: "LPM works", hint: "REAL DATA — CEDD LPMitP programme: 386 substandard government slopes and 113 hillside catchments under upgrading contracts, with contract and dates" },
+      { key: "csdiBarriers", label: "Debris barriers", hint: "REAL DATA — CEDD Catalogue of Slopes natural terrain hazard mitigation measures: 888 ND defence measures (rigid and flexible debris-resisting barriers, bunds, boulder fences) and 310 NS stabilisation measures. Footprints only — barrier type and height are not published." },
       { key: "csdiLandslides", label: "Landslide history", hint: "REAL DATA — CEDD landslide incident records (~11,000 points with dates and locations)" },
       { key: "csdiEntli", label: "Natural terrain landslides", hint: "REAL DATA — ENTLI: 113,000 natural terrain landslide crowns 1924–2023 as a density grid; zoom to 13+ for individual crowns and runout trails" },
       { key: "csdiBlackspots", label: "Flood blackspots", hint: "REAL DATA — DSD flooding blackspots currently on record, with causes and mitigation status" },
@@ -159,6 +160,7 @@ export default function MapOverlays() {
   if (layers.csdiLandslides) symbolRows.push({ label: "Past landslide (CEDD, live)", color: "#ff9d42", shape: "dot", hint: "Real landslide incident record" });
   if (layers.csdiBlackspots) symbolRows.push({ label: "Flood blackspot (DSD, live)", color: "#63b3ff", shape: "ring", hint: "Real DSD flooding blackspot" });
   if (layers.csdiLpm) symbolRows.push({ label: "LPM works: slope / catchment (CEDD, live)", color: "#e8862e", shape: "area", hint: "Real LPMitP upgrading works — amber slopes, gold hillside catchments" });
+  if (layers.csdiBarriers) symbolRows.push({ label: "Debris barrier ND · stabilisation NS (CEDD)", color: "#4f7cac", shape: "area", hint: "Real natural terrain mitigation footprints — steel blue defence measures (barriers, bunds, fences), green stabilisation works" });
   if (layers.csdiEntli) {
     symbolRows.push({ label: "Landslide density, 250 m cells (ENTLI)", color: "#df5a2b", shape: "area", hint: "Natural terrain landslide crowns per cell — darker is denser; zoom to 13+ for individual crowns and trails" });
     symbolRows.push({ label: "Crown / trail: recent · relict", color: "#b08968", shape: "dot", hint: "Rust = dated recent landslide, tan = relict (pre-1963 baseline)" });
@@ -294,6 +296,7 @@ export default function MapOverlays() {
           </div>
           <div className="sim3d-tally">
             <span><b>{sim3dImpact?.buildings ?? 0}</b> buildings hit</span>
+            {(sim3dImpact?.barriersInScene ?? 0) > 0 && <span title="CEDD-registered defence measures (ND) in the scene, drawn as indicative 4 m walls — the published data has no barrier height"><b>{sim3dImpact?.barriers ?? 0}</b>/{sim3dImpact?.barriersInScene} barriers reached</span>}
             <span><b>{sim3dImpact?.roads ?? 0}</b> road segments</span>
             <span><b>{sim3dImpact?.people ?? 0}</b> people</span>
             <span><b>{sim3dImpact?.vehicles ?? 0}</b> vehicles</span>

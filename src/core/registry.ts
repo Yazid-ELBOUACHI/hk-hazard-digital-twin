@@ -41,6 +41,7 @@ export interface ServiceRegistry {
 function buildRegistry(): ServiceRegistry {
   const simulation = new MockSimulationProvider();
   const dataset = getDataset();
+  const assetById = new Map(dataset.assets.map((a) => [a.id, a]));
   const risk = new HeuristicRiskEngine(
     (slope, t) => featuresFor(slope, t),
     (t, plusH) => projectedRain24(t, plusH),
@@ -52,6 +53,7 @@ function buildRegistry(): ServiceRegistry {
         for (let i = 1; i <= 24; i++) sum += rainRateAt(t + i * 3600_000);
         return sum;
       },
+      assetById: (id) => assetById.get(id),
     }
   );
 

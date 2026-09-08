@@ -11,6 +11,7 @@ import type { Layer } from "@deck.gl/core";
 import type maplibregl from "maplibre-gl";
 import type { SimulationResult, Sim3dImpact, Slope } from "@/core/types";
 import { getDeckOverlay } from "./deckOverlay";
+import { loadRealBarriers, ND_INDICATIVE_HEIGHT_M, type Barrier } from "@/live/realBarriers";
 
 export interface Debris3d {
   /** Start playback of a result; the slope (when known) drives the camera framing. */
@@ -43,6 +44,10 @@ type Kind = "car" | "bus" | "person";
 interface Poly { pts: XY[]; cum: number[]; len: number; samples: XY[] }
 interface Agent { kind: Kind; poly: Poly; s: number; dir: 1 | -1; speed: number; lateral: number; color: number[]; hit: boolean; pos: [number, number, number]; yaw: number }
 interface Building { ring: [number, number][]; ringM: XY[]; height: number; base: number; hit: boolean }
+/** A REAL CEDD defence measure (ND) near the toe, drawn as a wall of indicative height — the register has no height. */
+interface Wall { b: Barrier; ringM: XY[]; base: number; hit: boolean }
+const WALL_COLOR: [number, number, number, number] = [96, 124, 156, 235];
+const WALL_HIT: [number, number, number, number] = [236, 150, 48, 245];
 interface Mesh { positions: Float32Array; normals: Float32Array; texCoords: Float32Array }
 
 /** Low-poly shapes assembled from boxes, in metres, sitting on z = 0 and facing +x. */
@@ -146,6 +151,9 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
   let roads: Poly[] = [];
   let hitRoads = new Set<Poly>();
   let buildings: Building[] = [];
+  let walls: Wall[] = [];
+  let barrierRegister: Barrier[] = [];
+  void loadRealBarriers().then((d) => { if (d) barrierRegister = d.all.filter((b) => b.cls === "ND"); });
   let raf = 0, last = 0;
   let lastImpact = "";
   let useModels = true; // falls back to the built-in low-poly shapes if a glTF fails to load
@@ -223,6 +231,17 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
         out.push({ ring: ring as [number, number][], ringM, height: h, base: zAt(cx, cy), hit: false });
       }
       if (out.length > 400) break;
+    }
+    return out;
+  };
+
+  /** Real ND defence measures within reach of the toe: barriers, bunds and fences the front may run into. */
+  const wallsNearToe = (): Wall[] => {
+    const out: Wall[] = [];
+    for (const b of barrierRegister) {
+      const [cx, cy] = toM(b.lon, b.lat);
+      if (Math.hypot(cx, cy) > REACH_M + 150) continue;
+      out.push({ b, ringM: b.ring.map(([lon, lat]) => toM(lon, lat)), base: zAt(cx, cy), hit: false });
     }
     return out;
   };
@@ -348,6 +367,14 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
         pickable: false,
       }));
     }
+    if (walls.length) {
+      layers.push(new SolidPolygonLayer({
+        id: "debris-barriers", data: walls,
+        getPolygon: (w: Wall) => w.b.ring.map(([lon, lat]) => [lon, lat, w.base - zOff] as [number, number, number]),
+        extruded: true, getElevation: ND_INDICATIVE_HEIGHT_M, getFillColor: (w: Wall) => (w.hit ? WALL_HIT : WALL_COLOR),
+        updateTriggers: { getPolygon: zOff, getFillColor: walls.filter((w) => w.hit).length }, pickable: false,
+      }));
+    }
     const hitB = buildings.filter((b) => b.hit);
     if (hitB.length) {
       layers.push(new SolidPolygonLayer({ id: "debris-hit-buildings", data: hitB, getPolygon: (b: Building) => b.ring.map(([lon, lat]) => [lon, lat, b.base - zOff] as [number, number, number]), extruded: true, getElevation: (b: Building) => b.height + 1, getFillColor: [225, 60, 50, 150], updateTriggers: { getPolygon: zOff }, pickable: false }));
@@ -396,7 +423,7 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
   };
 
   const report = () => {
-    const imp: Sim3dImpact = { buildings: buildings.filter((b) => b.hit).length, roads: hitRoads.size, people: agents.filter((a) => a.kind === "person" && a.hit).length, vehicles: agents.filter((a) => a.kind !== "person" && a.hit).length, frontM: Math.round(front), phase };
+    const imp: Sim3dImpact = { buildings: buildings.filter((b) => b.hit).length, roads: hitRoads.size, people: agents.filter((a) => a.kind === "person" && a.hit).length, vehicles: agents.filter((a) => a.kind !== "person" && a.hit).length, barriers: walls.filter((w) => w.hit).length, barriersInScene: walls.length, frontM: Math.round(front), phase };
     const key = JSON.stringify(imp);
     if (key === lastImpact) return;
     lastImpact = key;
@@ -420,6 +447,7 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
     }
     if (front > 2) {
       for (const b of buildings) if (!b.hit && b.ringM.some(([x, y]) => inFlow(x, y))) b.hit = true;
+      for (const w of walls) if (!w.hit && w.ringM.some(([x, y]) => inFlow(x, y))) w.hit = true;
       for (const r of roads) if (!hitRoads.has(r) && r.samples.some(([x, y]) => inFlow(x, y))) hitRoads.add(r);
     }
     if (shakeUntil > now) {
@@ -453,6 +481,7 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
     roads = roadsNearToe();
     hitRoads = new Set();
     buildings = buildingsNearToe();
+    walls = wallsNearToe();
     spawnAgents();
     if (!raf) { last = performance.now(); raf = requestAnimationFrame(frame); }
   };

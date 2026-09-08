@@ -16,6 +16,9 @@ import {
 import { getDataset } from "./generate";
 import { offsetM } from "./geo";
 import { clamp, rngFor } from "./random";
+import { mitigationFactor, occurrence, returnPeriodYears } from "@/core/pola";
+
+export { returnPeriodYears };
 
 export const DEFAULT_PARAMS: ScenarioParams = {
   rainfallMm: 143,
@@ -36,20 +39,6 @@ export const DEFAULT_PARAMS: ScenarioParams = {
   warningLeadTimeMin: 0,
   interventions: [],
 };
-
-/**
- * Indicative return period of a 24-h rainfall total in Hong Kong, log-interpolated through the storms in
- * Zhang & He (IWDTERM 2026): 275 mm (1972), 623 mm (2008, ~200 y), 846 mm (7 Sep 2023, ~1000 y).
- */
-export function returnPeriodYears(mm24: number): number {
-  const pts: [number, number][] = [[100, 2], [150, 10], [275, 50], [400, 100], [623, 200], [846, 1000], [956, 2000]];
-  if (mm24 <= pts[0][0]) return pts[0][1];
-  for (let i = 0; i < pts.length - 1; i++) {
-    const [a, ra] = pts[i], [b, rb] = pts[i + 1];
-    if (mm24 <= b) return Math.round(Math.exp(Math.log(ra) + ((mm24 - a) / (b - a)) * (Math.log(rb) - Math.log(ra))));
-  }
-  return pts[pts.length - 1][1];
-}
 
 /** Max rolling 24-h total implied by the event (uniform intensity beyond 24 h). */
 export function rolling24hMm(p: Pick<ScenarioParams, "rainfallMm" | "rainfallDurationH">): number {
@@ -147,8 +136,25 @@ function coreModel(slope: Slope, p: ScenarioParams): Omit<SimulationResult, "job
   const seismic = (p.seismicPga ?? 0) >= 0.05;
   const timeToFailureH = failureLikely ? (seismic ? 0.1 : +(2 + (1 - prob) * 26).toFixed(1)) : null; // a quake triggers at once
 
+  // The same storm through the PoLA occurrence model (src/core/pola.ts): per-storm P(H | R) from the max rolling 24-h
+  // rainfall of the event and the slope's real features, reduced by the chosen interventions. Not the conditional
+  // stress-test probability above — that one asks "how bad if it goes", this one "how likely it goes".
+  let pola = occurrence({
+    r24Mm: rolling24hMm(p),
+    slopeType: slope.slopeType,
+    heightM: slope.heightM,
+    angleDeg: slope.slopeAngleDeg,
+    entliPerKm2: slope.entliPerKm2,
+    pastFailures: slope.realIncidents.length,
+    susceptibility: slope.susceptibility,
+    mitigation: mitigationFactor(slope.mitigations),
+    antecedent3dMm: p.antecedentRain3dMm,
+  }).p;
+  for (const iv of p.interventions) pola *= INTERVENTION_EFFECTS[iv]?.prob ?? 1;
+
   return {
     failureProbability: +prob.toFixed(2),
+    polaFailureProbability: pola,
     failureLikely,
     initiationZone:
       (runoffInit ? `Runoff-driven channelised initiation at ${p.peakHourlyMm} mm/h peak` : prob > 0.7 ? "Upper-middle slope face (tension crack zone)" : "Mid-slope surface layer") +

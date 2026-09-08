@@ -11,6 +11,7 @@ import { RISK_COLORS, RiskAssessment, SensorReading, Slope, Asset } from "@/core
 import SlopeDiagram from "./SlopeDiagram";
 import ConsequenceChain from "./ConsequenceChain";
 import Collapsible from "../ui/Collapsible";
+import Term from "../ui/Term";
 import type { SccTabId } from "./SlopeCommandCenter";
 
 interface Suggestion {
@@ -95,6 +96,8 @@ function suggest(slope: Slope, a: RiskAssessment, gameTime: number): Suggestion[
   return out.slice(0, 3);
 }
 
+const fmtP = (p: number) => (p >= 0.01 ? `${(p * 100).toFixed(1)} %` : p >= 1e-4 ? `${(p * 100).toFixed(2)} %` : p.toExponential(1));
+
 export default function OverviewTab({ slope, assessment, onNavigate }: { slope: Slope; assessment: RiskAssessment; onNavigate: (t: SccTabId) => void }) {
   const gameTime = useStore((s) => s.gameTime);
   const [latest, setLatest] = useState<SensorReading[]>([]);
@@ -139,26 +142,38 @@ export default function OverviewTab({ slope, assessment, onNavigate }: { slope: 
               <span className={`badge ${assessment.category}`}>{assessment.category.replace("-", " ")}</span>
             </div>
             <div className="kv" style={{ flex: 1 }}>
-              <span className="k">Trend (3 h)</span>
+              <span className="k"><Term id="trend" /></span>
               <span className={`v trend-${assessment.trend}`}>{assessment.trend === "up" ? "↑ increasing" : assessment.trend === "down" ? "↓ decreasing" : "→ stable"}</span>
-              <span className="k">Model confidence</span>
+              <span className="k"><Term id="confidence" /></span>
               <span className="v" style={{ color: assessment.confidence < 0.5 ? "#d9a6ff" : undefined }}>{Math.round(assessment.confidence * 100)}%</span>
-              <span className="k">People nearby</span>
+              <span className="k"><Term id="people-nearby" /></span>
               <span className="v">
                 ~{fmtInt(slope.populationNearby)}
                 {slope.census && (
-                  <span
-                    className="badge real"
-                    style={{ marginLeft: 6, fontSize: 8.5 }}
-                    title={`2021 census: ${fmtInt(slope.census.densityPerKm2)} residents/km² in STPU group ${slope.census.stpu}, within ${slope.census.reachM} m of the slope · ${Math.round(slope.census.share65Plus * 100)}% aged 65+`}
-                  >
-                    census
-                  </span>
+                  <Term id="census" className="badge real" >
+                    census · {fmtInt(slope.census.densityPerKm2)}/km² · {slope.census.reachM} m · {Math.round(slope.census.share65Plus * 100)}% 65+
+                  </Term>
                 )}
               </span>
             </div>
           </div>
           <p className="bottom-line">{assessment.explanation}</p>
+          {assessment.qra && (
+            <div className="kv" style={{ marginTop: 8 }}>
+              <span className="k"><Term id="r24" /> · <Term id="return-period" /></span>
+              <span className="v">{assessment.qra.r24Mm} mm · ~{assessment.qra.returnPeriodY} y</span>
+              <span className="k"><Term id="p-failure" /></span>
+              <span className="v">{fmtP(assessment.qra.pFailure)} <span className="muted">(correlation {fmtP(assessment.qra.pFailureBaseline)})</span></span>
+              <span className="k"><Term id="magnitude" /></span>
+              <span className="v">{assessment.qra.magnitude.map((m) => `${m.label} ${Math.round(m.p * 100)}%`).join(" · ")}</span>
+              <span className="k"><Term id="elements" /></span>
+              <span className="v">{fmtInt(assessment.qra.elements.residents)} residents · {assessment.qra.elements.buildings} blocks · {assessment.qra.elements.facilities} facilities · {assessment.qra.elements.roads} road{assessment.qra.mostExposedM !== null ? ` · nearest ${assessment.qra.mostExposedM} m` : ""}</span>
+              <span className="k"><Term id="pll">Expected fatalities (PLL) · this storm</Term></span>
+              <span className="v">{assessment.qra.pllEvent.toExponential(2)}</span>
+              <span className="k"><Term id="ir">Individual risk · nearest resident</Term></span>
+              <span className="v">{assessment.qra.irEvent.toExponential(1)} per event · {assessment.qra.irAnnual.toExponential(1)} /y <span className="muted">(HK criteria 1e-4 existing · 1e-5 new)</span></span>
+            </div>
+          )}
 
           <h3 style={{ marginTop: 14 }}>Suggested next steps</h3>
           {suggestions.map((s, i) => (
@@ -308,8 +323,11 @@ export default function OverviewTab({ slope, assessment, onNavigate }: { slope: 
             {slope.mitigations.length === 0 && <div className="muted" style={{ fontSize: 12 }}>None registered.</div>}
             {slope.mitigations.map((m, i) => (
               <div className="freshness-row" key={i}>
-                <span className="k">{m.type.replace(/-/g, " ")} ({m.installedYear})</span>
-                <span className={`badge ${m.condition > 0.7 ? "fresh" : "stale"}`}>condition {Math.round(m.condition * 100)}%</span>
+                <span className="k" title={m.note}>
+                  {m.type.replace(/-/g, " ")} ({m.installedYear || "year n/a"})
+                  {m.real && <span className="badge fresh" style={{ marginLeft: 6 }} title={`CEDD Catalogue of Slopes feature ${m.ref}`}>CEDD {m.ref}</span>}
+                </span>
+                <span className={`badge ${m.condition > 0.7 ? "fresh" : "stale"}`} title={m.real ? "Condition is not published — synthetic" : undefined}>condition {Math.round(m.condition * 100)}%{m.real ? " (est.)" : ""}</span>
               </div>
             ))}
             <h3 className="stat-label" style={{ margin: "14px 0 8px" }}>Live sensor snapshot</h3>

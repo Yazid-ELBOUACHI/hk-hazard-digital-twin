@@ -346,3 +346,17 @@ body.sim3d-mode .storm-banner,
 body.sim3d-mode .layer-panel { display: none !important; }
 /* with the side panels gone, the camera bar sits at the true right edge */
 body.sim3d-mode .cam-controls { right: 16px !important; }
+
+/* ---- Glossary terms: hover explanation, click → "How it is calculated" ---- */
+.term { border-bottom: 1px dotted var(--text-2); cursor: help; text-decoration: none; color: inherit; background: none; border-top: 0; border-left: 0; border-right: 0; padding: 0; font: inherit; }
+.term:hover, .term:focus-visible { color: var(--accent); border-bottom-color: var(--accent); outline: none; }
+.term-pop {
+  position: fixed; z-index: 10000; max-width: 340px; padding: 10px 12px; border-radius: 12px;
+  background: var(--bg-1, var(--bg-2)); color: var(--text-0); border: 1px solid var(--line-soft);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+  font-size: 11.5px; line-height: 1.5; pointer-events: none;
+}
+.term-pop b { display: block; margin-bottom: 3px; font-size: 12px; }
+.term-pop .go { display: block; margin-top: 6px; font-size: 10.5px; color: var(--accent); }
+.calc-flash { animation: calc-flash 2.4s ease-out; }
+@keyframes calc-flash { 0% { background: color-mix(in srgb, var(--accent) 28%, transparent); } 100% { background: transparent; } }

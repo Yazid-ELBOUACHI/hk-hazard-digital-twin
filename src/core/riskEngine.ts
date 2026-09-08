@@ -1,12 +1,21 @@
-// HeuristicRiskEngine — prototype risk scoring, explainability, trajectory & uncertainty.
-// Feature values are injected (dependency inversion): today they come from synthetic signal
-// synthesis; in production from a feature store fed by real sensors/rainfall.
+// PoLA risk engine — the twin's slope risk in the form used by Prof. Limin Zhang's group at HKUST:
+//
+//   Risk = P(H | R) · P(M | H, R) · P(L | H, M) · V(H, M, E) · E
+//
+// (He, Zhang, Xiao, Wang & Luo 2023; Zhang & He, IWDTERM 2026). Every term is a pure function in src/core/pola.ts
+// and is documented, with its coefficients, on the Data Sources page. This class only feeds the chain with the
+// slope's real attributes (geometry, feature type, CEDD incident record, ENTLI density, census residents, LandsD
+// blocks, facilities, roads) and the rainfall at the slope (HKO live + Storm Watch), then maps the result onto the
+// 0–100 band, the drivers, the trajectory and the KPIs. Feature values are injected (dependency inversion): today
+// monitoring evidence is synthetic; in production it comes from a feature store fed by real sensors.
 // DEMONSTRATION MODEL — NOT FOR ENGINEERING DECISIONS.
 
 import type { RiskEngine } from "./interfaces";
 import { yieldForMap } from "./schedule";
 import {
+  Asset,
   KpiSnapshot,
+  QraSummary,
   RiskAssessment,
   RiskCategory,
   RiskDriver,
@@ -15,6 +24,7 @@ import {
   Trend,
   scoreToCategory,
 } from "./types";
+import { barrierCondition, elementsOf, magnitude, mitigationFactor, occurrence, riskChain, scoreFromChain, type RiskChain } from "./pola";
 
 export interface DynamicFeatures {
   rain24Mm: number;
@@ -33,9 +43,14 @@ export interface RiskContext {
   activeIncidentSlopeIds: Set<string>;
   simulationsRunning: () => number;
   forecast24Mm: (gameTime: number) => number;
+  /** Real neighbours of a slope (LandsD blocks, facilities, roads) by asset id — the elements at risk. */
+  assetById?: (id: string) => Asset | undefined;
 }
 
 const HORIZONS = [0, 1, 3, 6, 12, 24] as const;
+/** The max rolling 24-h rainfall is sampled over the trailing day at this step (h). */
+const R24_LOOKBACK_STEP_H = 4;
+const R24_LOOKBACK_STEPS = 6;
 
 export class HeuristicRiskEngine implements RiskEngine {
   constructor(
@@ -44,34 +59,72 @@ export class HeuristicRiskEngine implements RiskEngine {
     private ctx: RiskContext
   ) {}
 
-  private rawScore(slope: Slope, f: DynamicFeatures): { score: number; parts: Record<string, number> } {
-    const geometryF = Math.min(1, ((slope.slopeAngleDeg - 20) / 42) * 0.7 + (slope.heightM / 180) * 0.3);
-    const soilF = Math.min(1, (30 - slope.soil.cohesionKPa) / 30) * 0.6 + (slope.soil.permeability === "low" ? 0.4 : 0.15);
-    const histF = slope.history.some((e) => e.kind === "incident") ? 1 : 0.25;
-    const mitAvg = slope.mitigations.length
-      ? slope.mitigations.reduce((s, m) => s + m.condition, 0) / slope.mitigations.length
-      : 0;
-    const mitF = Math.min(1, (slope.mitigations.length / 3) * (0.4 + 0.6 * mitAvg));
-    const rainF = Math.min(1.25, f.rain24Mm / 240);
-    const poreF = f.poreRatio;
-    const dispF = Math.min(1, f.dispRateMmHr / 3 + f.dispTotalMm / 300);
+  // ---- inputs ----
 
-    const parts = {
-      rainfall: 0.26 * rainF,
-      "pore pressure": 0.2 * poreF,
-      displacement: 0.17 * dispF,
-      "slope geometry": 0.14 * geometryF * slope.susceptibility,
-      "soil properties": 0.09 * soilF * slope.susceptibility,
-      "historical failures": 0.06 * histF,
-      "mitigation condition": 0.08 * (1 - mitF),
+  private r24Memo = new Map<string, number>();
+  /** Maximum rolling 24-h rainfall at the slope over the trailing day (the storm's R24 so far), memoised per 10 game-minutes. */
+  private maxRolling24(slope: Slope, gameTime: number, now: DynamicFeatures): number {
+    const key = `${slope.id}|${Math.round(gameTime / 600_000)}`;
+    const hit = this.r24Memo.get(key);
+    if (hit !== undefined) return hit;
+    let r = now.rain24Mm;
+    for (let k = 1; k <= R24_LOOKBACK_STEPS; k++) r = Math.max(r, this.features(slope, gameTime - k * R24_LOOKBACK_STEP_H * 3600_000).rain24Mm);
+    if (this.r24Memo.size > 20_000) this.r24Memo.clear();
+    this.r24Memo.set(key, r);
+    return r;
+  }
+
+  private elementsMemo = new Map<string, ReturnType<typeof elementsOf>>();
+  private elements(slope: Slope) {
+    const hit = this.elementsMemo.get(slope.id);
+    if (hit) return hit;
+    const assets = this.ctx.assetById ? slope.nearbyAssetIds.map((id) => this.ctx.assetById!(id)).filter((a): a is Asset => !!a) : [];
+    const els = elementsOf(slope, assets);
+    this.elementsMemo.set(slope.id, els);
+    return els;
+  }
+
+  private reachM(slope: Slope): number {
+    return slope.census?.reachM ?? Math.max(40, Math.min(220, slope.heightM * 2.1));
+  }
+
+  // ---- the chain ----
+
+  private chain(slope: Slope, r24Mm: number, f: DynamicFeatures): RiskChain {
+    const occ = occurrence({
+      r24Mm,
+      slopeType: slope.slopeType,
+      heightM: slope.heightM,
+      angleDeg: slope.slopeAngleDeg,
+      entliPerKm2: slope.entliPerKm2,
+      pastFailures: slope.realIncidents.length,
+      susceptibility: slope.susceptibility,
+      mitigation: mitigationFactor(slope.mitigations),
+      evidence: { poreRatio: f.poreRatio, dispRateMmHr: f.dispRateMmHr },
+    });
+    const mags = magnitude(r24Mm, slope.heightM);
+    return riskChain(occ, mags, this.elements(slope), this.reachM(slope), barrierCondition(slope.mitigations), r24Mm);
+  }
+
+  private scoreOf(chain: RiskChain): number {
+    return scoreFromChain(chain.occurrence.p, chain.pllEvent).score;
+  }
+
+  private chainAt(slope: Slope, gameTime: number, plusH: number, f0?: DynamicFeatures): RiskChain {
+    const f = f0 ?? this.features(slope, gameTime);
+    const r24Now = this.maxRolling24(slope, gameTime, f);
+    if (plusH === 0) return this.chain(slope, r24Now, f);
+    // ahead: the projected trailing-24 h total (Storm Watch ramp / forecast) can only raise the storm's R24 so far;
+    // the pore-pressure proxy follows the rain with lag
+    const futureRain = this.projectRain24(gameTime, plusH);
+    const fFuture: DynamicFeatures = {
+      ...f,
+      rain24Mm: futureRain,
+      poreRatio: Math.min(0.99, f.poreRatio * 0.55 + Math.min(1.3, futureRain / 220) * 0.5),
+      dispRateMmHr: f.dispRateMmHr * (1 + Math.max(0, futureRain - f.rain24Mm) / 180),
+      dispTotalMm: f.dispTotalMm + f.dispRateMmHr * plusH,
     };
-    const base = 0.34 * slope.susceptibility;
-    const dyn = Object.values(parts).reduce((a, b) => a + b, 0);
-    // Calibration: the linear sum puts the median slope in "elevated" on any wet day. A convex
-    // squash keeps the ordering but makes the inventory read realistically — most registered
-    // slopes low/moderate, a tail of elevated/high, critical only under exceptional conditions.
-    const raw = Math.max(0, Math.min(1.2, base + dyn));
-    return { score: Math.max(0, Math.min(100, Math.pow(raw, 1.45) * 100)), parts };
+    return this.chain(slope, Math.max(r24Now, futureRain), fFuture);
   }
 
   private confidenceOf(slope: Slope, gameTime: number): {
@@ -99,56 +152,74 @@ export class HeuristicRiskEngine implements RiskEngine {
     return { confidence, sensorCoverage, geometryConfidence, parameterUncertainty, freshnessPenalty };
   }
 
-  private scoreAtHorizon(slope: Slope, gameTime: number, plusH: number, f0?: DynamicFeatures): number {
-    const f = f0 ?? this.features(slope, gameTime);
-    if (plusH === 0) return this.rawScore(slope, f).score;
-    const futureRain = this.projectRain24(gameTime, plusH);
-    // saturation memory: pore pressure follows rain with lag
-    const fFuture: DynamicFeatures = {
-      ...f,
-      rain24Mm: futureRain,
-      poreRatio: Math.min(0.99, f.poreRatio * 0.55 + Math.min(1.3, futureRain / 220) * 0.5),
-      dispRateMmHr: f.dispRateMmHr * (1 + Math.max(0, futureRain - f.rain24Mm) / 180),
-      dispTotalMm: f.dispTotalMm + f.dispRateMmHr * plusH,
+  private summarise(c: RiskChain): QraSummary {
+    const { hazardIdx, consIdx } = scoreFromChain(c.occurrence.p, c.pllEvent);
+    return {
+      r24Mm: Math.round(c.r24Mm),
+      returnPeriodY: c.returnPeriodY,
+      pFailure: c.occurrence.p,
+      pFailureBaseline: c.occurrence.baseline,
+      pMajor: c.pMajor,
+      magnitude: c.magnitude.map((m) => ({ cls: m.cls, label: m.label, volumeM3: m.volumeM3, p: m.p })),
+      consequencePerClass: c.consequencePerClass,
+      pllEvent: c.pllEvent,
+      irEvent: c.irEvent,
+      irAnnual: c.irAnnual,
+      mostExposedM: c.mostExposedM,
+      elements: c.elements,
+      hazardIdx,
+      consIdx,
     };
-    return this.rawScore(slope, fFuture).score;
   }
+
+  // ---- public API ----
 
   assess(slope: Slope, gameTime: number): RiskAssessment {
     const f = this.features(slope, gameTime);
-    const { score, parts } = this.rawScore(slope, f);
+    const c = this.chainAt(slope, gameTime, 0, f);
+    const score = this.scoreOf(c);
     const category = scoreToCategory(score, slope.hasData);
     const unc = this.confidenceOf(slope, gameTime);
 
-    const totalParts = Object.values(parts).reduce((a, b) => a + b, 0) || 1;
+    // drivers: the named log-odds contributions to P(H | R), by absolute size, plus the consequence side
+    const parts: Record<string, number> = { ...c.occurrence.logOdds };
+    const total = Object.values(parts).reduce((a, b) => a + Math.abs(b), 0) || 1;
     const drivers: RiskDriver[] = Object.entries(parts)
-      .map(([factor, v]) => ({ factor, sharePct: Math.round((v / totalParts) * 100) }))
+      .map(([factor, v]) => ({ factor: v < 0 ? `${factor} (protective)` : factor, sharePct: Math.round((Math.abs(v) / total) * 100) }))
+      .filter((d) => d.sharePct > 0)
       .sort((a, b) => b.sharePct - a.sharePct);
 
     const trajectory: TrajectoryPoint[] = HORIZONS.map((h) => {
-      const s = this.scoreAtHorizon(slope, gameTime, h, f);
+      const s = h === 0 ? score : this.scoreOf(this.chainAt(slope, gameTime, h, f));
       return { horizonH: h, score: Math.round(s), category: scoreToCategory(s, slope.hasData) };
     });
 
-    const past = this.scoreAtHorizon(slope, gameTime - 3 * 3600_000, 0);
+    const past = this.scoreOf(this.chainAt(slope, gameTime - 3 * 3600_000, 0));
     const trend: Trend = score - past > 2.5 ? "up" : past - score > 2.5 ? "down" : "stable";
 
+    const q = this.summarise(c);
     const top = drivers.slice(0, 2).map((d) => d.factor);
     const catLabel = category.toUpperCase().replace("-", " ");
+    const pct = (p: number) => (p >= 0.01 ? `${(p * 100).toFixed(1)} %` : p >= 1e-4 ? `${(p * 100).toFixed(2)} %` : `${p.toExponential(1)}`);
     const explanation = !slope.hasData
       ? `Insufficient data: this slope has no recent instrumentation or survey coverage, so risk cannot be assessed reliably. Field inspection recommended.`
-      : `Risk is ${catLabel} (score ${Math.round(score)}/100), primarily driven by ${top.join(" and ")}. ` +
-        `Trailing 24-h rainfall is ${f.rain24Mm.toFixed(0)} mm and the pore-pressure proxy is at ${(f.poreRatio * 100).toFixed(0)}% of critical. ` +
-        `Movement rate is ${f.dispRateMmHr.toFixed(2)} mm/hr. ` +
+      : `Risk is ${catLabel} (score ${Math.round(score)}/100). ` +
+        `With a maximum rolling 24-h rainfall of ${q.r24Mm} mm (return period ~${q.returnPeriodY} y) the per-storm failure probability P(H|R) is ${pct(q.pFailure)} ` +
+        `(statistical correlation for a ${slope.slopeType.replace("-", " ")}: ${pct(q.pFailureBaseline)}; log-odds mainly from ${top.join(" and ")}). ` +
+        `A failure would most likely be ${q.magnitude.reduce((a, b) => (b.p > a.p ? b : a)).label}; P(≥ 50 m³) = ${pct(q.pMajor)}. ` +
+        `Expected fatalities this storm (PLL) ${q.pllEvent.toExponential(1)}` +
+        (q.mostExposedM !== null ? `, individual risk to the nearest resident ${q.irEvent.toExponential(1)} per event (${q.irAnnual.toExponential(1)} /y indicative)` : "") +
+        `. ` +
         (trajectory[3].category !== category
-          ? `Conditions are expected to shift this slope to ${trajectory[3].category.toUpperCase()} within ~6 h. `
+          ? `Projected rainfall moves this slope to ${trajectory[3].category.toUpperCase()} within ~6 h. `
           : `No band change expected in the next 6 h. `) +
-        `Model confidence ${(unc.confidence * 100).toFixed(0)}% (sensor coverage ${(unc.sensorCoverage * 100).toFixed(0)}%, geometry confidence ${(unc.geometryConfidence * 100).toFixed(0)}%). Synthetic demonstration output.`;
+        `Model confidence ${(unc.confidence * 100).toFixed(0)}% (sensor coverage ${(unc.sensorCoverage * 100).toFixed(0)}%, geometry confidence ${(unc.geometryConfidence * 100).toFixed(0)}%). PoLA chain on real slope, rainfall and exposure data; monitoring evidence and material terms synthetic.`;
 
     return {
       slopeId: slope.id,
       score: Math.round(score),
       category,
+      qra: q,
       confidence: unc.confidence,
       trend,
       drivers,
@@ -167,7 +238,7 @@ export class HeuristicRiskEngine implements RiskEngine {
     return m;
   }
 
-  /** ~4,000 slopes in slices of 250 with a yield between slices: no task longer than a few ms. */
+  /** ~4,000 slopes in slices with a yield between slices: no task longer than a few ms. */
   async assessAllAsync(slopes: Slope[], gameTime: number): Promise<Map<string, RiskAssessment>> {
     const m = new Map<string, RiskAssessment>();
     const CHUNK = 64;
@@ -175,20 +246,20 @@ export class HeuristicRiskEngine implements RiskEngine {
       await yieldForMap();
       const end = Math.min(slopes.length, i + CHUNK);
       for (let k = i; k < end; k++) m.set(slopes[k].id, this.assess(slopes[k], gameTime));
-
     }
     return m;
   }
 
   projectScore(slope: Slope, gameTime: number, plusHours: number): { score: number; category: RiskCategory } {
-    const s = this.scoreAtHorizon(slope, gameTime, plusHours);
+    const s = this.scoreOf(this.chainAt(slope, gameTime, plusHours));
     return { score: Math.round(s), category: scoreToCategory(s, slope.hasData) };
   }
 
   projectUnderStorm(slope: Slope, gameTime: number, plusHours: number): RiskAssessment {
-    const s = this.scoreAtHorizon(slope, gameTime, plusHours);
+    const c = this.chainAt(slope, gameTime, plusHours);
+    const s = this.scoreOf(c);
     const base = this.assess(slope, gameTime);
-    return { ...base, score: Math.round(s), category: scoreToCategory(s, slope.hasData) };
+    return { ...base, score: Math.round(s), category: scoreToCategory(s, slope.hasData), qra: this.summarise(c) };
   }
 
   async kpis(slopes: Slope[], assessments: Map<string, RiskAssessment>, gameTime: number): Promise<KpiSnapshot> {
@@ -206,6 +277,11 @@ export class HeuristicRiskEngine implements RiskEngine {
         else buildings.add(id);
       }
       population += s.populationNearby;
+    }
+    let expectedLandslides = 0, pllEvent = 0;
+    for (const a of assessments.values()) {
+      expectedLandslides += a.qra?.pFailure ?? 0;
+      pllEvent += a.qra?.pllEvent ?? 0;
     }
     const sensorsAll = slopes.flatMap((s) => s.sensors);
     const rain24 = this.features(slopes[0], gameTime).rain24Mm; // representative; city KPI uses mean below
@@ -238,6 +314,8 @@ export class HeuristicRiskEngine implements RiskEngine {
       sensorsAnomalous: sensorsAll.filter((s) => s.anomalous).length,
       sensorsOffline: sensorsAll.filter((s) => !s.online).length,
       simulationsRunning: this.ctx.simulationsRunning(),
+      expectedLandslides,
+      pllEvent,
       trends: {
         criticalSlopes: trendOf(critical, prev.critical),
         highRiskSlopes: trendOf(high, prev.high),
@@ -267,14 +345,12 @@ export class HeuristicRiskEngine implements RiskEngine {
       const end = Math.min(slopes.length, i + CHUNK);
       for (let k = i; k < end; k++) {
         const s = slopes[k];
-        const f = this.features(s, gameTime);
-        const sc = this.rawScore(s, f).score;
+        const sc = this.scoreOf(this.chainAt(s, gameTime, 0));
         const c = scoreToCategory(sc, s.hasData);
         if (c === "critical") { critical++; population += s.populationNearby; }
         else if (c === "high") { high++; population += s.populationNearby; }
         else if (c === "moderate") moderate++;
       }
-
     }
     const rain = Math.round(slopes.slice(0, 40).reduce((sum, s) => sum + this.features(s, gameTime).rain24Mm, 0) / 40);
     return { critical, high, moderate, population, rain };

@@ -10,6 +10,7 @@ import { SIM_DISCLAIMER } from "@/core/types";
 import { returnPeriodYears, rolling24hMm } from "@/mock/MockSimulationProvider";
 import SlopeDiagram from "./SlopeDiagram";
 import Collapsible from "../ui/Collapsible";
+import Term from "../ui/Term";
 
 const MODES = [
   { id: "instant" as const, label: "Instant", sub: "precomputed library · <1 s", hint: "Interpolates a precomputed scenario library. Fastest, least specific." },
@@ -377,7 +378,13 @@ function ResultPanel({ slope, assessment }: { slope: Slope; assessment: RiskAsse
 
       <Collapsible title="All predicted outputs" storageKey="scc.scenario.outputs" summary={`${fmtInt(result.displacedVolumeM3)} m³ · ${fmtInt(result.affectedAreaM2)} m² · ${result.buildingsExposed} buildings`}>
         <div className="kv">
-          <span className="k">Failure probability</span><span className="v">{Math.round(result.failureProbability * 100)}%</span>
+          <span className="k"><Term id="stress-test" /></span><span className="v">{Math.round(result.failureProbability * 100)}%</span>
+          {result.polaFailureProbability !== undefined && (
+            <>
+              <span className="k"><Term id="pola-scenario" /></span>
+              <span className="v">{result.polaFailureProbability >= 0.01 ? `${(result.polaFailureProbability * 100).toFixed(1)} %` : `${(result.polaFailureProbability * 100).toFixed(3)} %`}</span>
+            </>
+          )}
           <span className="k">Failure time estimate</span><span className="v">{result.timeToFailureH !== null ? `~${result.timeToFailureH} h` : "n/a"}</span>
           <span className="k">Displaced volume</span><span className="v">{fmtInt(result.displacedVolumeM3)} m³</span>
           <span className="k">Runout distance</span><span className="v">{result.runoutDistanceM} m</span>

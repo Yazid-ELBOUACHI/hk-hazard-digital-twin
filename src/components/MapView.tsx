@@ -10,9 +10,13 @@ import type { StyleSpecification, LayerSpecification } from "maplibre-gl";
 import { useStore, BasemapId } from "@/state/store";
 import { registry } from "@/core/registry";
 import { HK_CENTER } from "@/mock/geo";
+
+/** The opening (and "reset view") camera: Hong Kong Island from the south, tilted over the terrain. */
+const HOME_VIEW = { center: [114.195, 22.258] as [number, number], zoom: 11.7, pitch: 60, bearing: -4 };
 import { RISK_COLORS, Slope, RiskAssessment, RiskCategory, Asset, Incident, SimulationResult } from "@/core/types";
 import { offsetM } from "@/mock/geo";
 import { fetchSlopesInBbox, fetchBlackspots, fetchLandslides, fetchLpmWorks, fetchEntliInBbox, fetchRoadsInBbox } from "@/live/csdi";
+import { loadRealBarriers, barrierPolygonFC, barrierPointFC } from "@/live/realBarriers";
 import type { LiveRain } from "@/live/hko";
 import { setMapInteracting, yieldForMap } from "@/core/schedule";
 import { slopeCamera } from "@/core/mapSelection";
@@ -62,13 +66,13 @@ const DEM_TILES = ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/
 const OWN_SOURCE_IDS = [
   "dem", "dem-hillshade", "slopes", "slopes-blobs", "slopes-pts", "roads", "buildings", "drainage", "incidents", "sensors", "mitigated", "historical", "rainfall-pts", "flood",
   "runout", "runout-front", "selected", "csdi-slopes", "csdi-blackspots", "csdi-landslides",
-  "csdi-lpm", "csdi-lpm-pts", "entli-grid", "csdi-entli-crowns", "csdi-entli-trails", "live-rain", "csdi-roads", "facilities-local", "building-blocks",
+  "csdi-lpm", "csdi-lpm-pts", "cedd-barriers", "cedd-barriers-pts", "entli-grid", "csdi-entli-crowns", "csdi-entli-trails", "live-rain", "csdi-roads", "facilities-local", "building-blocks",
 ];
 const OWN_LAYER_IDS = [
   "flood-fill", "flood-line", "rain-heat", "entli-grid-fill", "csdi-slopes-fill", "csdi-slopes-line", "csdi-lpm-fill", "csdi-lpm-line",
   "slopes-blobs-fill", "slopes-pt", "slopes-fill", "slopes-line", "uncertainty-fill", "csdi-roads-line", "roads-line",
   "building-blocks-pt", "facilities-local-pt", "buildings-pt", "drainage-pt", "mitigated-pt", "historical-pt", "sensors-pt", "incidents-pt", "csdi-landslides-pt", "csdi-blackspots-pt",
-  "csdi-lpm-pt", "csdi-entli-trails-line", "csdi-entli-crowns-pt", "live-rain-pt",
+  "csdi-lpm-pt", "cedd-barriers-fill", "cedd-barriers-line", "cedd-barriers-pt", "csdi-entli-trails-line", "csdi-entli-crowns-pt", "live-rain-pt",
   "runout-fill", "runout-line", "runout-front-pt", "selected-fill", "selected-halo", "selected-line",
 ];
 
@@ -403,6 +407,8 @@ function mountOwnLayers(map: maplibregl.Map) {
   map.addSource("csdi-landslides", { type: "geojson", data: EMPTY_FC });
   map.addSource("csdi-lpm", { type: "geojson", data: EMPTY_FC });
   map.addSource("csdi-lpm-pts", { type: "geojson", data: EMPTY_FC });
+  map.addSource("cedd-barriers", { type: "geojson", data: EMPTY_FC });
+  map.addSource("cedd-barriers-pts", { type: "geojson", data: EMPTY_FC });
   map.addSource("entli-grid", { type: "geojson", data: EMPTY_FC });
   map.addSource("csdi-entli-crowns", { type: "geojson", data: EMPTY_FC });
   map.addSource("csdi-entli-trails", { type: "geojson", data: EMPTY_FC });
@@ -439,6 +445,18 @@ function mountOwnLayers(map: maplibregl.Map) {
   map.addLayer({
     id: "csdi-lpm-line", type: "line", source: "csdi-lpm", layout: { visibility: "none" },
     paint: { "line-color": lpmColor, "line-width": ["interpolate", ["linear"], ["zoom"], 10, 1, 15, 2.2], "line-opacity": 0.95 },
+  });
+
+  // CEDD natural terrain hazard mitigation measures — real footprints: steel-blue ND defence measures (debris-resisting
+  // barriers, bunds, boulder fences), green NS stabilisation works. Strips a few metres wide, so drawn boldly.
+  const barrierColor: any = ["match", ["get", "cls"], "NS", "#5fa870", "#4f7cac"];
+  map.addLayer({
+    id: "cedd-barriers-fill", type: "fill", source: "cedd-barriers", layout: { visibility: "none" },
+    paint: { "fill-color": barrierColor, "fill-opacity": 0.55 },
+  });
+  map.addLayer({
+    id: "cedd-barriers-line", type: "line", source: "cedd-barriers", layout: { visibility: "none" },
+    paint: { "line-color": barrierColor, "line-width": ["interpolate", ["linear"], ["zoom"], 12, 1.2, 16, 3], "line-opacity": 0.95 },
   });
 
   map.addLayer({
@@ -568,6 +586,11 @@ function mountOwnLayers(map: maplibregl.Map) {
   map.addLayer({
     id: "csdi-lpm-pt", type: "circle", source: "csdi-lpm-pts", layout: { visibility: "none" }, maxzoom: 13,
     paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 3, 13, 6], "circle-color": lpmColor, "circle-opacity": 0.9, "circle-stroke-width": 1, "circle-stroke-color": "#3a2408" },
+  });
+  // debris barriers as points far out (the footprints are sub-pixel below zoom ~14)
+  map.addLayer({
+    id: "cedd-barriers-pt", type: "circle", source: "cedd-barriers-pts", layout: { visibility: "none" }, maxzoom: 14,
+    paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 2.5, 14, 5], "circle-color": barrierColor, "circle-opacity": 0.9, "circle-stroke-width": 1, "circle-stroke-color": "#1d2b3a" },
   });
   // ENTLI runout trails and crowns (live, viewport-scoped, zoom ≥ 12): rust = dated recent, tan = relict
   const entliColor: any = ["match", ["get", "SLIDE_TYPE"], "R", "#b08968", "#df5a2b"];
@@ -731,14 +754,15 @@ export default function MapView() {
 
     void initialStyle.then((style) => {
       if (cancelled || mapRef.current) return;
-      // first view: close on Central / Mid-Levels — the CBD with the registered slopes on the hillside behind it
+      // first view: Hong Kong Island from the south — Stanley at the bottom, Kowloon and Tai Mo Shan on the horizon —
+      // the whole island's slope inventory readable at once on imagery and terrain
       const map = new maplibregl.Map({
         container,
         style,
-        center: [114.158, 22.28],
-        zoom: 14.6,
-        pitch: useStore.getState().map3d ? 56 : 0,
-        bearing: -24,
+        center: HOME_VIEW.center,
+        zoom: HOME_VIEW.zoom,
+        pitch: useStore.getState().map3d ? HOME_VIEW.pitch : 0,
+        bearing: HOME_VIEW.bearing,
         maxPitch: 62, // beyond this the horizon pulls in far more terrain-draped tiles than the view is worth
         maxZoom: 17.5, // beyond this the camera dips under the exaggerated terrain and the frame goes black
         minZoom: 9, // this is a Hong Kong twin, not a world map — never let the view (or an accidental scroll) leave the territory
@@ -1047,7 +1071,7 @@ export default function MapView() {
         map.easeTo({ zoom: map.getZoom() + (viewCmd.delta ?? 1), duration: 160 });
         break;
       case "home":
-        map.easeTo({ center: HK_CENTER, zoom: 10.4, pitch: useStore.getState().map3d ? 52 : 0, bearing: -12, duration: 400 });
+        map.easeTo({ center: HOME_VIEW.center, zoom: HOME_VIEW.zoom, pitch: useStore.getState().map3d ? HOME_VIEW.pitch : 0, bearing: HOME_VIEW.bearing, duration: 400 });
         break;
     }
   }, [viewCmd]);
@@ -1218,6 +1242,9 @@ function applyVisibility(map: maplibregl.Map, layers: ReturnType<typeof useStore
   safe("csdi-lpm-fill", layers.csdiLpm);
   safe("csdi-lpm-line", layers.csdiLpm);
   safe("csdi-lpm-pt", layers.csdiLpm);
+  safe("cedd-barriers-fill", layers.csdiBarriers);
+  safe("cedd-barriers-line", layers.csdiBarriers);
+  safe("cedd-barriers-pt", layers.csdiBarriers);
   safe("entli-grid-fill", layers.csdiEntli);
   safe("csdi-entli-trails-line", layers.csdiEntli);
   safe("csdi-entli-crowns-pt", layers.csdiEntli);
@@ -1369,6 +1396,15 @@ function syncCsdiData(map: maplibregl.Map, layers: ReturnType<typeof useStore.ge
       })
       .catch((err) => console.warn("CSDI LPM works fetch failed:", err));
   }
+  if (layers.csdiBarriers) {
+    loadRealBarriers()
+      .then((d) => {
+        if (!d) return;
+        setSrcData(map, "cedd-barriers", barrierPolygonFC(d));
+        setSrcData(map, "cedd-barriers-pts", barrierPointFC(d));
+      })
+      .catch((err) => console.warn("CEDD barriers unavailable:", err));
+  }
   if (layers.csdiEntli) {
     ensureEntliGrid(map).catch((err) => console.warn("ENTLI grid unavailable:", err));
     refreshEntli(map);
@@ -1432,6 +1468,15 @@ function wireCsdiPopups(map: maplibregl.Map, popupFor: () => maplibregl.Popup) {
     foot("LandsD")
   ));
   wire("csdi-lpm-pt", lpmHtml);
+  const barrierHtml = (p: any) =>
+    `<div style="font-family:var(--mono);font-weight:600">${p.id}</div>` +
+    `<div style="font-size:10px">${p.cls === "NS" ? "Natural terrain stabilisation measure (NS)" : "Natural terrain defence measure (ND) — debris-resisting barrier, bund or boulder fence"}</div>` +
+    `<div style="color:#6d7a8c;font-size:10px">${p.loc ?? ""}</div>` +
+    `<div style="color:#6d7a8c;font-size:10px">footprint ${p.lengthM} m × ${p.widthM} m · maintained by ${p.maint || "—"}${p.nearest ? ` · nearest inventory slope ${p.nearest}` : ""}</div>` +
+    `<div style="color:#6d7a8c;font-size:10px">type, height and design volume not published</div>` +
+    foot("CEDD Catalogue of Slopes");
+  wire("cedd-barriers-fill", barrierHtml);
+  wire("cedd-barriers-pt", barrierHtml);
   const ENTLI_TYPE: Record<string, string> = { R: "relict (pre-1963 baseline)", C: "recent · channelised", O: "recent · open hillslope", S: "recent · other" };
   wire("csdi-entli-crowns-pt", (p) => (
     `<div style="font-family:var(--mono);font-weight:600">${p.ENTLI_NO}</div>` +

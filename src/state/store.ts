@@ -46,6 +46,7 @@ export interface LayerState {
   csdiBlackspots: boolean;
   csdiLandslides: boolean;
   csdiLpm: boolean; // LPMitP works programme polygons
+  csdiBarriers: boolean; // CEDD natural terrain hazard mitigation measures (ND debris barriers, NS stabilisation)
   csdiEntli: boolean; // ENTLI natural terrain landslides (density grid far out, crowns + trails close in)
   liveRain: boolean; // HKO rain-gauge stations with the latest past-hour reading
   rain3d: boolean; // rain streaks over the terrain in 3D, driven by the displayed mm/hr
@@ -174,6 +175,7 @@ export const useStore = create<AppState>((set, get) => ({
     csdiBlackspots: false,
     csdiLandslides: false,
     csdiLpm: false,
+    csdiBarriers: false,
     csdiEntli: false,
     liveRain: false,
     rain3d: true,
@@ -185,7 +187,7 @@ export const useStore = create<AppState>((set, get) => ({
   mapLoaded: false,
   riskFilter: { ...ALL_RISK_VISIBLE },
   viewCmd: null,
-  basemap: "light",
+  basemap: "satellite", // opens on imagery + terrain; the layer sheet switches to the light / dark vector maps
   map3d: true, // 3D terrain + buildings by default; the HUD toggle flattens the map for a 2D read
 
   scenarioParams: { ...DEFAULT_PARAMS },

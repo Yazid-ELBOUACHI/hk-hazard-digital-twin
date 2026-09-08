@@ -6,13 +6,15 @@ import { useStore } from "@/state/store";
 import { fmtInt } from "@/core/format";
 import type { Trend } from "@/core/types";
 import Collapsible from "./ui/Collapsible";
+import Term from "./ui/Term";
+import type { ReactNode } from "react";
 
 function TrendMark({ t }: { t?: Trend }) {
   if (!t || t === "stable") return <span className="kpi-trend trend-stable">→</span>;
   return <span className={`kpi-trend trend-${t}`}>{t === "up" ? "↑" : "↓"}</span>;
 }
 
-function Tile({ label, value, unit, color, trend, sub, wide }: { label: string; value: string; unit?: string; color: string; trend?: Trend; sub?: string; wide?: boolean }) {
+function Tile({ label, value, unit, color, trend, sub, wide }: { label: ReactNode; value: string; unit?: string; color: string; trend?: Trend; sub?: string; wide?: boolean }) {
   return (
     <div className={`tile ${wide ? "wide" : ""}`}>
       <div className="tile-l">
@@ -29,7 +31,7 @@ function Tile({ label, value, unit, color, trend, sub, wide }: { label: string; 
   );
 }
 
-function Row({ label, value, color, trend }: { label: string; value: string; color: string; trend?: Trend }) {
+function Row({ label, value, color, trend }: { label: ReactNode; value: string; color: string; trend?: Trend }) {
   return (
     <div className="kpi-row">
       <span className="dot" style={{ background: color }} />
@@ -59,13 +61,20 @@ export default function KpiPanel() {
           <Row label="Elevated" value={String(kpi.elevatedSlopes)} color="var(--risk-elevated)" />
           <Row label="Moderate" value={String(kpi.moderateSlopes)} color="var(--risk-moderate)" trend={kpi.trends.moderateSlopes} />
           <Row label="Requiring monitoring" value={String(kpi.monitoringRequired)} color="var(--accent)" />
+          {kpi.expectedLandslides !== undefined && (
+            <>
+              <Row label={<Term id="expected-landslides" />} value={kpi.expectedLandslides >= 10 ? fmtInt(kpi.expectedLandslides) : kpi.expectedLandslides >= 1 ? kpi.expectedLandslides.toFixed(1) : kpi.expectedLandslides.toFixed(2)} color="var(--accent)" />
+              <Row label={<Term id="pll" />} value={(kpi.pllEvent ?? 0) >= 0.1 ? (kpi.pllEvent ?? 0).toFixed(1) : (kpi.pllEvent ?? 0).toExponential(1)} color="var(--risk-high)" />
+            </>
+          )}
         </div>
+        <div className="row-hint">Σ over the inventory of the PoLA chain P(H|R)·P(M|H,R)·P(L|H,M)·V·E — see Data sources → How it is calculated.</div>
       </div>
 
       <div className="panel">
         <h3>Exposure</h3>
         <div className="tiles">
-          <Tile label="People near at-risk slopes" value={fmtInt(kpi.populationExposed)} color="var(--risk-high)" trend={kpi.trends.populationExposed} wide />
+          <Tile label={<Term id="people-at-risk" />} value={fmtInt(kpi.populationExposed)} color="var(--risk-high)" trend={kpi.trends.populationExposed} wide />
         </div>
         <div className="kpi-rows">
           <Row label="Active incidents" value={String(kpi.activeIncidents)} color="var(--risk-high)" />

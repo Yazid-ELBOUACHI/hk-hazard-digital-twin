@@ -55,16 +55,25 @@ export default function App() {
   return (
     <div className="app">
       <div className="synth-banner">
-        <span className="pill">Prototype</span>
-        <span><b>Real</b> CEDD slope inventory &amp; LPM works, landslide records, ENTLI, HKO live rainfall, 2021 census</span>
-        <span className="sep" />
-        <span><b>Synthetic</b> risk scores, sensors, simulations, active incidents, forecast</span>
-        <span className="sep" />
+        <div className="provenance-intro">
+          <span className="pill">Prototype</span>
+          <span className="provenance-title">Data provenance</span>
+        </div>
+        <div className="provenance-item real-source">
+          <span className="source-dot" />
+          <b>Observed</b>
+          <span>CEDD slopes · incidents · HKO rain · census</span>
+        </div>
+        <div className="provenance-item synthetic-source">
+          <span className="source-dot" />
+          <b>Modelled</b>
+          <span>risk · sensors · scenarios · forecast</span>
+        </div>
+        <div className="subheader-actions">
         <span className="credit" title="Basemap and imagery credits">
-          Map ©{" "}
-          <a href="https://openfreemap.org" target="_blank" rel="noreferrer">OpenFreeMap</a> ·{" "}
-          <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors · Esri imagery · Mapzen terrain · 3D models ©{" "}
-          <a href="https://github.com/KhronosGroup/glTF-Sample-Assets" target="_blank" rel="noreferrer">Cesium / Khronos glTF samples</a> (CC BY 4.0)
+          Map: <a href="https://openfreemap.org" target="_blank" rel="noreferrer">OpenFreeMap</a> ·{" "}
+          <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OSM</a> · Esri · Mapzen ·{" "}
+          <a href="https://github.com/KhronosGroup/glTF-Sample-Assets" target="_blank" rel="noreferrer">Cesium</a>
         </span>
         <button
           className="banner-link"
@@ -87,6 +96,7 @@ export default function App() {
         >
           {whatsNewUnseen && <span className="new-dot" />}What's new →
         </button>
+        </div>
       </div>
       <TopBar />
       {view === "emergency" && (

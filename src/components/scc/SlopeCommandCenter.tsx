@@ -45,15 +45,23 @@ export default function SlopeCommandCenter() {
   return (
     <div className="scc-overlay">
       <div className="scc-header">
-        <button className="btn sm" onClick={() => selectSlope(null)}>← Back to map</button>
-        <h2>{slope.id}</h2>
-        <span className={`badge ${assessment.category}`}>{assessment.category.replace("-", " ")}</span>
-        <span className="badge synth">Synthetic</span>
-        <button className="btn sm" onClick={() => flyToSlope(slope.id)} title="Fit this slope into the visible map">Locate slope</button>
-        <div className="meta">
-          {slope.district}, {slope.region} · {slope.slopeType} · {slope.slopeAngleDeg}° · {slope.heightM} m high · sensors updated {timeAgo(slope.freshness.sensor, gameTime)}
+        <div className="scc-header-topline">
+          <button className="btn sm back-btn" onClick={() => selectSlope(null)}>← Back to map</button>
+          <span className="scc-eyebrow">Slope command center</span>
+          <span className="close-hint"><span className="kbd">Esc</span> closes</span>
         </div>
-        <span className="close-hint"><span className="kbd">Esc</span> closes</span>
+        <div className="scc-title-row">
+          <h2>{slope.id}</h2>
+          <span className={`badge ${assessment.category}`}>{assessment.category.replace("-", " ")}</span>
+          <span className="badge synth">Modelled risk</span>
+          <button className="btn sm locate-btn" onClick={() => flyToSlope(slope.id)} title="Fit this slope into the visible map">Locate slope</button>
+        </div>
+        <div className="meta">
+          <span>{slope.district}, {slope.region}</span><i />
+          <span>{slope.slopeType}</span><i />
+          <span>{slope.slopeAngleDeg}° · {slope.heightM} m high</span><i />
+          <span className="meta-fresh">Sensors updated {timeAgo(slope.freshness.sensor, gameTime)}</span>
+        </div>
       </div>
       <div className="scc-body">
         <div className="scc-nav">

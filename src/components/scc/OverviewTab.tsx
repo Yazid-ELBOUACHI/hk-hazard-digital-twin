@@ -126,39 +126,43 @@ export default function OverviewTab({ slope, assessment, onNavigate }: { slope: 
   const suggestions = suggest(slope, assessment, gameTime);
   const dated = slope.realIncidents.filter((i) => i.date).sort((x, y) => y.date!.localeCompare(x.date!));
   const color = RISK_COLORS[assessment.category];
+  const decisionSummary = assessment.category === "no-data"
+    ? assessment.explanation
+    : `Risk is ${assessment.category.toUpperCase()} at ${assessment.score}/100. ${assessment.trend === "up" ? "Conditions are deteriorating." : assessment.trend === "down" ? "Conditions are improving." : "Conditions are currently stable."} Model confidence is ${Math.round(assessment.confidence * 100)}%; approximately ${fmtInt(slope.populationNearby)} people are within the indicative reach area.`;
 
   return (
     <div>
       {/* Row 1: bottom line + next steps | cross-section */}
       <div className="grid2">
-        <div className="card">
-          <h3>Bottom line</h3>
-          <div style={{ display: "flex", alignItems: "center", gap: 18, marginBottom: 10 }}>
-            <div>
+        <div className="card overview-hero-card">
+          <div className="overview-card-head">
+            <div><span className="overview-eyebrow">Current assessment</span><h3>Bottom line</h3></div>
+            <span className="assessment-time">Now · {Math.round(assessment.confidence * 100)}% confidence</span>
+          </div>
+          <div className="risk-summary-grid">
+            <div className="risk-score-panel">
               <div className="stat-big" style={{ color }}>
                 {assessment.score}
-                <span style={{ fontSize: 13, color: "var(--text-2)" }}>/100</span>
+                <span>/100</span>
               </div>
               <span className={`badge ${assessment.category}`}>{assessment.category.replace("-", " ")}</span>
             </div>
-            <div className="kv" style={{ flex: 1 }}>
-              <span className="k"><Term id="trend" /></span>
-              <span className={`v trend-${assessment.trend}`}>{assessment.trend === "up" ? "↑ increasing" : assessment.trend === "down" ? "↓ decreasing" : "→ stable"}</span>
-              <span className="k"><Term id="confidence" /></span>
-              <span className="v" style={{ color: assessment.confidence < 0.5 ? "#d9a6ff" : undefined }}>{Math.round(assessment.confidence * 100)}%</span>
-              <span className="k"><Term id="people-nearby" /></span>
-              <span className="v">
-                ~{fmtInt(slope.populationNearby)}
+            <div className="risk-facts">
+              <div className="risk-fact"><span><Term id="trend" /></span><b className={`trend-${assessment.trend}`}>{assessment.trend === "up" ? "↑ Increasing" : assessment.trend === "down" ? "↓ Decreasing" : "→ Stable"}</b></div>
+              <div className="risk-fact"><span><Term id="confidence" /></span><b style={{ color: assessment.confidence < 0.5 ? "#d9a6ff" : undefined }}>{Math.round(assessment.confidence * 100)}%</b></div>
+              <div className="risk-fact people-fact"><span><Term id="people-nearby" /></span><b>~{fmtInt(slope.populationNearby)}</b>
                 {slope.census && (
                   <Term id="census" className="badge real" >
                     census · {fmtInt(slope.census.densityPerKm2)}/km² · {slope.census.reachM} m · {Math.round(slope.census.share65Plus * 100)}% 65+
                   </Term>
                 )}
-              </span>
+              </div>
             </div>
           </div>
-          <p className="bottom-line">{assessment.explanation}</p>
+          <div className="decision-callout"><span aria-hidden="true">!</span><p>{decisionSummary}</p></div>
           {assessment.qra && (
+            <Collapsible title="Quantitative risk detail" summary={`${fmtP(assessment.qra.pFailure)} failure · PLL ${assessment.qra.pllEvent.toExponential(1)}`} storageKey="scc.qra-detail" className="qra-disclosure">
+            <p className="qra-explanation">{assessment.explanation}</p>
             <div className="kv" style={{ marginTop: 8 }}>
               <span className="k"><Term id="r24" /> · <Term id="return-period" /></span>
               <span className="v">{assessment.qra.r24Mm} mm · ~{assessment.qra.returnPeriodY} y</span>
@@ -201,6 +205,7 @@ export default function OverviewTab({ slope, assessment, onNavigate }: { slope: 
                 </>
               )}
             </div>
+            </Collapsible>
           )}
 
           <h3 style={{ marginTop: 14 }}>Suggested next steps</h3>
@@ -374,4 +379,3 @@ export default function OverviewTab({ slope, assessment, onNavigate }: { slope: 
     </div>
   );
 }
-

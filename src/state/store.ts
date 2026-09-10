@@ -3,7 +3,7 @@
 import { create } from "zustand";
 import { registry } from "@/core/registry";
 import { GAME_EPOCH, prepareRealSlopes } from "@/mock/generate";
-import { fetchLiveRain, startLiveRainPolling, type LiveRain } from "@/live/hko";
+import { fetchLiveRain, fetchNowcast, startLiveRainPolling, type LiveRain, type Nowcast } from "@/live/hko";
 import { getSourceStatus, subscribeSources, type SourceStatus } from "@/core/dataSources";
 import { timed } from "@/core/schedule";
 import { DEFAULT_PARAMS } from "@/mock/MockSimulationProvider";
@@ -23,7 +23,7 @@ import type {
 } from "@/core/types";
 
 export type ViewId = "overview" | "emergency" | "planning" | "reports" | "ask";
-export type ReportsTabId = "sitrep" | "validation" | "rainfall" | "sources";
+export type ReportsTabId = "sitrep" | "storm" | "validation" | "rainfall" | "sources" | "whatsnew";
 export type BasemapId = "light" | "dark" | "satellite";
 
 const ALL_RISK_VISIBLE: Record<RiskCategory, boolean> = { low: true, moderate: true, elevated: true, high: true, critical: true, "no-data": true };
@@ -47,6 +47,7 @@ export interface LayerState {
   csdiLandslides: boolean;
   csdiLpm: boolean; // LPMitP works programme polygons
   csdiBarriers: boolean; // CEDD natural terrain hazard mitigation measures (ND debris barriers, NS stabilisation)
+  stormGrid: boolean; // PoLA storm report: expected landslides per GEO 750 × 600 m cell
   csdiEntli: boolean; // ENTLI natural terrain landslides (density grid far out, crowns + trails close in)
   liveRain: boolean; // HKO rain-gauge stations with the latest past-hour reading
   rain3d: boolean; // rain streaks over the terrain in 3D, driven by the displayed mm/hr
@@ -69,6 +70,7 @@ interface AppState {
   kpi: KpiSnapshot | null;
   weather: WeatherState | null;
   liveRain: LiveRain | null; // latest HKO observation (real), null when unavailable
+  nowcast: Nowcast | null; // latest HKO 2-h gridded rainfall nowcast (real), null when the proxy is unreachable
   sourceStatus: Record<string, SourceStatus>; // runtime status per data source id
 
   // ui
@@ -84,7 +86,7 @@ interface AppState {
   flyTo: { center: [number, number]; zoom: number; token: number } | null;
   mapLoaded: boolean; // true once terrain + overlay layers are on screen
   riskFilter: Record<RiskCategory, boolean>; // legend-driven visibility of slope risk classes
-  viewCmd: { type: "rotate" | "tilt" | "north" | "home" | "zoom"; delta?: number; token: number } | null; // camera commands for the map
+  viewCmd: { type: "rotate" | "tilt" | "north" | "home" | "zoom" | "scene" | "source" | "toe"; delta?: number; token: number } | null; // camera commands for the map
   basemap: BasemapId; // light/dark vector (OpenFreeMap) or satellite imagery (Esri)
   map3d: boolean;
 
@@ -99,6 +101,7 @@ interface AppState {
   animSpeed: number;
   // 3D playback of simResult on the map (illustrative presentation of the engine's result)
   sim3dActive: boolean;
+  sim3dReady: boolean;
   sim3dImpact: Sim3dImpact | null;
 
   // actions
@@ -126,7 +129,7 @@ interface AppState {
   resetScenarioParams(): void;
   toggleRiskCategory(c: RiskCategory): void;
   resetRiskFilter(): void;
-  sendViewCmd(type: "rotate" | "tilt" | "north" | "home" | "zoom", delta?: number): void;
+  sendViewCmd(type: NonNullable<AppState["viewCmd"]>["type"], delta?: number): void;
   setBasemap(b: BasemapId): void;
   setMap3d(enabled: boolean): void;
 }
@@ -137,6 +140,7 @@ let refreshing = false;
 let initialization: Promise<void> | null = null;
 let scenarioSeq = 0;
 let basemapBeforeSim3d: BasemapId | null = null;
+let map3dBeforeSim3d: boolean | null = null;
 let cameraSeq = 0;
 
 export const useStore = create<AppState>((set, get) => ({
@@ -152,6 +156,7 @@ export const useStore = create<AppState>((set, get) => ({
   kpi: null,
   weather: null,
   liveRain: null,
+  nowcast: null,
   sourceStatus: {},
 
   view: "overview",
@@ -176,6 +181,7 @@ export const useStore = create<AppState>((set, get) => ({
     csdiLandslides: false,
     csdiLpm: false,
     csdiBarriers: false,
+    stormGrid: false,
     csdiEntli: false,
     liveRain: false,
     rain3d: true,
@@ -199,6 +205,7 @@ export const useStore = create<AppState>((set, get) => ({
   animTimeSec: 0,
   animSpeed: 1,
   sim3dActive: false,
+  sim3dReady: false,
   sim3dImpact: null,
 
   async init() {
@@ -208,14 +215,15 @@ export const useStore = create<AppState>((set, get) => ({
     subscribeSources(() => set({ sourceStatus: getSourceStatus() }));
     // The real CEDD slope inventory (+ baked real context) must be in place before the registry builds
     // the dataset; the first HKO observation is fetched alongside so the first risk pass is already live.
-    const [, live] = await Promise.all([prepareRealSlopes(), fetchLiveRain().catch(() => null)]);
+    const [, live, nowcast] = await Promise.all([prepareRealSlopes(), fetchLiveRain().catch(() => null), fetchNowcast()]);
     if (live) registry.weather.setLive(live);
+    if (nowcast) registry.weather.setNowcast(nowcast);
     const [slopes, assets, incidents] = await Promise.all([
       registry.slopes.getAll(),
       registry.assets.getAll(),
       registry.incidents.getActive(get().gameTime),
     ]);
-    set({ slopes, assets, incidents, liveRain: live, ready: true });
+    set({ slopes, assets, incidents, liveRain: live, nowcast, ready: true });
     await get().refreshDerived(true);
     // keep the rainfall baseline live: HKO publishes hourly, we re-check every 5 real minutes
     startLiveRainPolling(
@@ -227,6 +235,15 @@ export const useStore = create<AppState>((set, get) => ({
       5 * 60_000,
       false
     );
+    // the 2-hour nowcast is reissued every 12 min; re-pull every 6 so the trajectory follows it
+    setInterval(() => {
+      void fetchNowcast().then((n) => {
+        if (!n) return;
+        registry.weather.setNowcast(n);
+        set({ nowcast: n });
+        void get().refreshDerived(true);
+      });
+    }, 6 * 60_000);
     })();
     return initialization;
   },
@@ -267,6 +284,7 @@ export const useStore = create<AppState>((set, get) => ({
   selectSlope(id) {
     const slope = id ? get().slopes.find((s) => s.id === id) : undefined;
     if (id && !slope) return;
+    if (get().sim3dActive) get().setSim3d(false);
     scenarioSeq++;
     set({
       selectedSlopeId: id,
@@ -291,6 +309,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   setView(v) {
+    if (get().sim3dActive) get().setSim3d(false);
     set({ view: v });
   },
 
@@ -299,6 +318,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   setRole(r) {
+    if (get().sim3dActive) get().setSim3d(false);
     const patch: Partial<AppState> = { role: r };
     if (r === "emergency") patch.view = "emergency";
     if (r === "public") { patch.view = "overview"; patch.commandCenterOpen = false; }
@@ -372,10 +392,12 @@ export const useStore = create<AppState>((set, get) => ({
     // the playback owns the screen: the command centre folds away, the basemap goes to imagery (a pale
     // vector map turns the hillside into paper), and both come back on exit
     set((st) => {
-      if (active && !st.sim3dActive) basemapBeforeSim3d = st.basemap;
+      if (active && (!st.simResult || st.simResult.slopeId !== st.selectedSlopeId)) return {};
+      if (active && !st.sim3dActive) { basemapBeforeSim3d = st.basemap; map3dBeforeSim3d = st.map3d; }
       const basemap = active ? "satellite" : basemapBeforeSim3d ?? st.basemap;
-      if (!active) basemapBeforeSim3d = null;
-      return { sim3dActive: active, sim3dImpact: active ? st.sim3dImpact : null, commandCenterOpen: active ? false : st.selectedSlopeId !== null, basemap };
+      const map3d = active ? true : map3dBeforeSim3d ?? st.map3d;
+      if (!active) { basemapBeforeSim3d = null; map3dBeforeSim3d = null; }
+      return { sim3dActive: active, sim3dReady: false, animPlaying: false, map3d, ...(active ? { animTimeSec: 0 } : {}), sim3dImpact: null, commandCenterOpen: active ? false : st.selectedSlopeId !== null, basemap };
     });
   },
   setSim3dImpact(i) {
@@ -423,6 +445,7 @@ export const useStore = create<AppState>((set, get) => ({
     set({ basemap: b });
   },
   setMap3d(map3d) {
+    if (!map3d && get().sim3dActive) get().setSim3d(false);
     set({ map3d });
   },
 }));

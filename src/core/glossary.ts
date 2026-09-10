@@ -53,7 +53,7 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
   },
   ir: {
     label: "Individual risk",
-    what: "Probability that the most exposed person (a ground-floor occupant of the nearest block) is killed: per event, and divided by the storm's return period as an indicative annual figure. Hong Kong judges 1e-4 per year acceptable for an existing slope and 1e-5 for a new one.",
+    what: "Probability that the most exposed person (a ground-floor occupant of the nearest block) is killed: per event, and per year from the climatological annual failure probability (storm rates from the return-period table × P(failure | R) per class). Hong Kong judges 1e-4 per year acceptable for an existing slope and 1e-5 for a new one.",
     calc: "calc-risk-numbers",
   },
   "expected-landslides": {
@@ -106,5 +106,41 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     label: "monitoring evidence",
     what: "Pore-pressure ratio and displacement rate on the slope. Real sensors would update the failure probability; in the prototype they are synthetic signals derived from rainfall plus per-slope noise, and labelled so.",
     calc: "calc-signals",
+  },
+  uncertainty: {
+    label: "Uncertainty σ",
+    what: "The twin's belief on P(failure | R) is a normal on the log-odds. σ is its standard deviation, built from the parts the open data cannot pin down: population-correlation scatter (0.55), material (0.6), hydrology (0.5), geometry survey age (0.15–0.3) and mitigation condition (0.4), combined as √Σσ². The 5–95 % ranges on P(H|R) and PLL come from it, and each observation type collapses a different part.",
+    calc: "calc-uncertainty",
+  },
+  voi: {
+    label: "What to observe next",
+    what: "Value of information: for the decision to take a precautionary action now (HK$0.08 M — a day's road closure and crew) or wait, the expected reduction in loss from making one more observation before deciding — a preposterior analysis on the log-odds belief. Options are ranked by VOI per HK$ and hour; a ratio above 1 pays for itself. This is the Stage B/C layer of the decision-aware active sensing framework.",
+    calc: "calc-voi",
+  },
+  "voi-upgrade": {
+    label: "Upgrade decision · value of information",
+    what: "The planning-horizon decision: upgrade the slope now (HK$5 M, LPM-type works) or defer, judged on the annual failure probability over a 25-year life against VSL HK$30 M. Each investigation type (inspection, LiDAR, piezometers, GNSS, ground investigation) is valued by how much it would change that decision, per HK$ and hour. Stage B/C of the decision-aware active sensing framework.",
+    calc: "calc-voi",
+  },
+  evpi: {
+    label: "EVPI",
+    what: "Expected value of perfect information: what it would be worth to know P(failure) exactly before deciding. An upper bound on any observation's value; when it is below the cheapest observation's cost the twin has enough evidence.",
+    calc: "calc-voi",
+  },
+  nowcast: {
+    label: "Next 2 h · nowcast",
+    what: "HKO's gridded rainfall nowcast: half-hourly accumulated rainfall for the next two hours on a ~2 km grid, reissued every 12 minutes. The server keeps the Hong Kong cells and reduces them to the twin's 36 HKO stations; each slope's +1 h and +3 h trajectory adds its nearest station's nowcast. Real data.",
+    calc: "calc-nowcast",
+    source: "hko-nowcast",
+  },
+  "storm-grid": {
+    label: "Expected landslides grid",
+    what: "GEO's 750 m × 600 m gridding (Survey and Mapping Office), the unit Xiao, Zhang et al. (2023) use to compare predicted and observed landslide counts. Each cell sums P(failure | R) over the inventory slopes inside it.",
+    calc: "calc-storm-report",
+  },
+  replay: {
+    label: "Storm replay",
+    what: "The 40 wettest days since 1984 run through the occurrence term with each slope's nearest GEO gauge, compared with the CEDD incidents reported that day. The correlation and calibration factor say how well the anchor of the rainfall–landslide correlation fits the inventory.",
+    calc: "calc-replay",
   },
 };

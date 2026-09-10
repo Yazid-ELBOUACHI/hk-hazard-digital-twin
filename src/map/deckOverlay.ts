@@ -16,7 +16,27 @@ const overlays = new WeakMap<maplibregl.Map, { overlay: MapboxOverlay; slots: Ma
 export function getDeckOverlay(map: maplibregl.Map): DeckSlots {
   let entry = overlays.get(map);
   if (!entry) {
-    const overlay = new MapboxOverlay({ interleaved: true, layers: [] });
+    // MapLibre 4 owns this canvas. deck 9.4 drops useDevicePixels in interleaved mode,
+    // so explicitly mirror the actual drawing buffer before each shared render pass.
+    // This also handles resizing and Windows fractional display scaling.
+    const overlay = new MapboxOverlay({
+      interleaved: true,
+      layers: [],
+      onBeforeRender: ({ device }) => {
+        const canvas = map.getCanvas();
+        const context = device.canvasContext;
+        if (!context) return;
+        const [width, height] = context.getDrawingBufferSize();
+        if (width !== canvas.width || height !== canvas.height) context.setDrawingBufferSize(canvas.width, canvas.height);
+        // MapLibre already resized the canvas, so luma skips its resize callback.
+        // Its default framebuffer wrapper can still have the old height, which
+        // shifts every deck layer vertically when it computes the GL viewport.
+        const framebuffer = context.getCurrentFramebuffer();
+        if (framebuffer.width !== canvas.width || framebuffer.height !== canvas.height) {
+          framebuffer.resize([canvas.width, canvas.height]);
+        }
+      },
+    });
     map.addControl(overlay as unknown as maplibregl.IControl);
     entry = { overlay, slots: new Map() };
     overlays.set(map, entry);

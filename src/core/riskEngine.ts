@@ -24,7 +24,7 @@ import {
   Trend,
   scoreToCategory,
 } from "./types";
-import { barrierCondition, elementsOf, magnitude, mitigationFactor, occurrence, riskChain, scoreFromChain, type RiskChain } from "./pola";
+import { annualOccurrence, barrierCondition, elementsOf, magnitude, mitigationFactor, occurrence, pllRange, riskChain, scoreFromChain, uncertaintyOf, upgradeVoi, valueOfInformation, type RiskChain } from "./pola";
 
 export interface DynamicFeatures {
   rain24Mm: number;
@@ -45,6 +45,8 @@ export interface RiskContext {
   forecast24Mm: (gameTime: number) => number;
   /** Real neighbours of a slope (LandsD blocks, facilities, roads) by asset id — the elements at risk. */
   assetById?: (id: string) => Asset | undefined;
+  /** HKO 2-h gridded nowcast: rainfall expected at the slope over the next `plusHours` (0 when unavailable). */
+  nowcastMm?: (slope: Slope, plusHours: number) => number;
 }
 
 const HORIZONS = [0, 1, 3, 6, 12, 24] as const;
@@ -84,6 +86,24 @@ export class HeuristicRiskEngine implements RiskEngine {
     return els;
   }
 
+  private annualMemo = new Map<string, number>();
+  /** Climatological annual failure probability — static per slope (no monitoring evidence). */
+  private pAnnual(slope: Slope): number {
+    const hit = this.annualMemo.get(slope.id);
+    if (hit !== undefined) return hit;
+    const p = annualOccurrence({
+      slopeType: slope.slopeType,
+      heightM: slope.heightM,
+      angleDeg: slope.slopeAngleDeg,
+      entliPerKm2: slope.entliPerKm2,
+      pastFailures: slope.realIncidents.length,
+      susceptibility: slope.susceptibility,
+      mitigation: mitigationFactor(slope.mitigations),
+    });
+    this.annualMemo.set(slope.id, p);
+    return p;
+  }
+
   private reachM(slope: Slope): number {
     return slope.census?.reachM ?? Math.max(40, Math.min(220, slope.heightM * 2.1));
   }
@@ -103,7 +123,7 @@ export class HeuristicRiskEngine implements RiskEngine {
       evidence: { poreRatio: f.poreRatio, dispRateMmHr: f.dispRateMmHr },
     });
     const mags = magnitude(r24Mm, slope.heightM);
-    return riskChain(occ, mags, this.elements(slope), this.reachM(slope), barrierCondition(slope.mitigations), r24Mm);
+    return riskChain(occ, mags, this.elements(slope), this.reachM(slope), barrierCondition(slope.mitigations), r24Mm, this.pAnnual(slope));
   }
 
   private scoreOf(chain: RiskChain): number {
@@ -116,7 +136,9 @@ export class HeuristicRiskEngine implements RiskEngine {
     if (plusH === 0) return this.chain(slope, r24Now, f);
     // ahead: the projected trailing-24 h total (Storm Watch ramp / forecast) can only raise the storm's R24 so far;
     // the pore-pressure proxy follows the rain with lag
-    const futureRain = this.projectRain24(gameTime, plusH);
+    // the real 2-h nowcast (nearest HKO station) rides on top of the projection while the twin's clock is near real time
+    const nowcast = this.ctx.nowcastMm && Math.abs(gameTime - Date.now()) < 3 * 3600_000 ? this.ctx.nowcastMm(slope, plusH) : 0;
+    const futureRain = this.projectRain24(gameTime, plusH) + nowcast;
     const fFuture: DynamicFeatures = {
       ...f,
       rain24Mm: futureRain,
@@ -152,9 +174,38 @@ export class HeuristicRiskEngine implements RiskEngine {
     return { confidence, sensorCoverage, geometryConfidence, parameterUncertainty, freshnessPenalty };
   }
 
-  private summarise(c: RiskChain): QraSummary {
+  private summarise(c: RiskChain, slope: Slope, gameTime: number): QraSummary {
     const { hazardIdx, consIdx } = scoreFromChain(c.occurrence.p, c.pllEvent);
+    const geometryAgeDays = (gameTime - Date.parse(slope.freshness.geometry)) / 86400_000;
+    const inspectionAgeDays = (gameTime - Date.parse(slope.freshness.inspection)) / 86400_000;
+    const unc = uncertaintyOf(c.occurrence.p, { pastFailures: slope.realIncidents.length, geometryAgeDays, mitigationInspected: inspectionAgeDays < 180 });
+    const hasBlocks = c.elements.buildings > 0;
+    const pll = pllRange(c.pllEvent, unc.sigma, hasBlocks);
+    // consequence given a failure, K = Σ_j P(M_j) · C_j — the loss the precautionary decision is about
+    const K = c.magnitude.reduce((s, m, i) => s + m.p * c.consequencePerClass[i], 0);
+    const v = K > 0 ? valueOfInformation(c.occurrence.p, unc, K) : null;
+    const vu = K > 0 ? upgradeVoi(c.pAnnual, unc, K) : null;
+    const pack = (r: NonNullable<typeof v>) => ({
+      decision: r.decision,
+      expectedLossWaitHKDm: r.expectedLossWaitHKDm,
+      actCostHKDm: r.actCostHKDm,
+      evpiHKDm: r.evpiHKDm,
+      enough: r.enough,
+      worthIt: r.worthIt,
+      best: r.best ? { id: r.best.id, label: r.best.label, costHKDm: r.best.costHKDm, hours: r.best.hours, voiHKDm: r.best.voiHKDm, ratio: r.best.ratio } : null,
+      options: r.options,
+    });
     return {
+      pAnnual: c.pAnnual,
+      pllAnnual: c.pllAnnual,
+      voiUpgrade: vu ? pack(vu) : undefined,
+      sigma: unc.sigma,
+      pFailure5: unc.p5,
+      pFailure95: unc.p95,
+      pll5: pll.p5,
+      pll95: pll.p95,
+      uncertaintyParts: { ...unc.parts },
+      voi: v ? pack(v) : undefined,
       r24Mm: Math.round(c.r24Mm),
       returnPeriodY: c.returnPeriodY,
       pFailure: c.occurrence.p,
@@ -197,7 +248,7 @@ export class HeuristicRiskEngine implements RiskEngine {
     const past = this.scoreOf(this.chainAt(slope, gameTime - 3 * 3600_000, 0));
     const trend: Trend = score - past > 2.5 ? "up" : past - score > 2.5 ? "down" : "stable";
 
-    const q = this.summarise(c);
+    const q = this.summarise(c, slope, gameTime);
     const top = drivers.slice(0, 2).map((d) => d.factor);
     const catLabel = category.toUpperCase().replace("-", " ");
     const pct = (p: number) => (p >= 0.01 ? `${(p * 100).toFixed(1)} %` : p >= 1e-4 ? `${(p * 100).toFixed(2)} %` : `${p.toExponential(1)}`);
@@ -207,8 +258,8 @@ export class HeuristicRiskEngine implements RiskEngine {
         `With a maximum rolling 24-h rainfall of ${q.r24Mm} mm (return period ~${q.returnPeriodY} y) the per-storm failure probability P(H|R) is ${pct(q.pFailure)} ` +
         `(statistical correlation for a ${slope.slopeType.replace("-", " ")}: ${pct(q.pFailureBaseline)}; log-odds mainly from ${top.join(" and ")}). ` +
         `A failure would most likely be ${q.magnitude.reduce((a, b) => (b.p > a.p ? b : a)).label}; P(≥ 50 m³) = ${pct(q.pMajor)}. ` +
-        `Expected fatalities this storm (PLL) ${q.pllEvent.toExponential(1)}` +
-        (q.mostExposedM !== null ? `, individual risk to the nearest resident ${q.irEvent.toExponential(1)} per event (${q.irAnnual.toExponential(1)} /y indicative)` : "") +
+        `Expected fatalities this storm (PLL) ${q.pllEvent.toExponential(1)} (5–95 %: ${q.pll5.toExponential(1)}–${q.pll95.toExponential(1)})` +
+        (q.mostExposedM !== null ? `, individual risk to the nearest resident ${q.irEvent.toExponential(1)} per event (${q.irAnnual.toExponential(1)} /y)` : "") +
         `. ` +
         (trajectory[3].category !== category
           ? `Projected rainfall moves this slope to ${trajectory[3].category.toUpperCase()} within ~6 h. `
@@ -259,7 +310,7 @@ export class HeuristicRiskEngine implements RiskEngine {
     const c = this.chainAt(slope, gameTime, plusHours);
     const s = this.scoreOf(c);
     const base = this.assess(slope, gameTime);
-    return { ...base, score: Math.round(s), category: scoreToCategory(s, slope.hasData), qra: this.summarise(c) };
+    return { ...base, score: Math.round(s), category: scoreToCategory(s, slope.hasData), qra: this.summarise(c, slope, gameTime) };
   }
 
   async kpis(slopes: Slope[], assessments: Map<string, RiskAssessment>, gameTime: number): Promise<KpiSnapshot> {
@@ -278,10 +329,17 @@ export class HeuristicRiskEngine implements RiskEngine {
       }
       population += s.populationNearby;
     }
-    let expectedLandslides = 0, pllEvent = 0;
+    let expectedLandslides = 0, expectedLandslides5 = 0, expectedLandslides95 = 0, pllEvent = 0;
     for (const a of assessments.values()) {
       expectedLandslides += a.qra?.pFailure ?? 0;
+      expectedLandslides5 += a.qra?.pFailure5 ?? 0;
+      expectedLandslides95 += a.qra?.pFailure95 ?? 0;
       pllEvent += a.qra?.pllEvent ?? 0;
+    }
+    let nowcast2hMm: number | undefined;
+    if (this.ctx.nowcastMm && Math.abs(gameTime - Date.now()) < 3 * 3600_000) {
+      const sample = slopes.slice(0, 40);
+      nowcast2hMm = Math.round((sample.reduce((s, sl) => s + this.ctx.nowcastMm!(sl, 2), 0) / Math.max(1, sample.length)) * 10) / 10;
     }
     const sensorsAll = slopes.flatMap((s) => s.sensors);
     const rain24 = this.features(slopes[0], gameTime).rain24Mm; // representative; city KPI uses mean below
@@ -315,7 +373,10 @@ export class HeuristicRiskEngine implements RiskEngine {
       sensorsOffline: sensorsAll.filter((s) => !s.online).length,
       simulationsRunning: this.ctx.simulationsRunning(),
       expectedLandslides,
+      expectedLandslides5,
+      expectedLandslides95,
       pllEvent,
+      nowcast2hMm,
       trends: {
         criticalSlopes: trendOf(critical, prev.critical),
         highRiskSlopes: trendOf(high, prev.high),

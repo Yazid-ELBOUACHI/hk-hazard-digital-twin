@@ -16,7 +16,7 @@ const TABS: { id: SccTabId; label: string; hint: string }[] = [
 ];
 
 export default function SlopeCommandCenter() {
-  const [tab, setTab] = useState<SccTabId>("overview");
+  const [tab, setTab] = useState<SccTabId>(() => useStore.getState().simResult ? "scenario" : "overview");
   const selectedSlopeId = useStore((s) => s.selectedSlopeId);
   const slopes = useStore((s) => s.slopes);
   const assessments = useStore((s) => s.assessments);
@@ -26,7 +26,7 @@ export default function SlopeCommandCenter() {
 
   // a newly selected slope always starts on Overview
   useEffect(() => {
-    setTab("overview");
+    setTab(useStore.getState().simResult?.slopeId === selectedSlopeId ? "scenario" : "overview");
   }, [selectedSlopeId]);
 
   // Esc closes the command center

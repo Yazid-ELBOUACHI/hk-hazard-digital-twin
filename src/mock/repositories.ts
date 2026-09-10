@@ -20,7 +20,7 @@ import type {
   ValidationRecord,
   WeatherState,
 } from "@/core/types";
-import type { LiveRain } from "@/live/hko";
+import type { Nowcast, LiveRain } from "@/live/hko";
 import { getDataset } from "./generate";
 import {
   forecastSeries,
@@ -36,6 +36,8 @@ import {
   setLiveRain,
   setStormOverlay,
   stormEtaHours,
+  getNowcast,
+  setNowcast,
 } from "./signals";
 
 export class MockSlopeRepository implements SlopeRepository {
@@ -116,6 +118,10 @@ export class MockWeatherDataProvider implements WeatherDataProvider {
       quality,
       isSynthetic: !real,
     });
+    const nc = getNowcast();
+    const nowcastSummary: WeatherState["nowcast"] = nc
+      ? { updated: nc.updated, steps: nc.steps, mean2h: nc.territory.mean2h, max2h: nc.territory.max2h, stations: nc.stations.length }
+      : undefined;
     let summary: WeatherState["live"];
     if (live) {
       const rates = live.stations.map((s) => s.mmHr);
@@ -144,6 +150,7 @@ export class MockWeatherDataProvider implements WeatherDataProvider {
       stormEtaHours: eta !== null ? Math.max(0, +eta.toFixed(1)) : undefined,
       temperatureC: 27,
       live: summary,
+      nowcast: nowcastSummary,
     };
   }
   regionalFactor(lon: number, lat: number): number {
@@ -153,6 +160,10 @@ export class MockWeatherDataProvider implements WeatherDataProvider {
     setStormOverlay(activeSince);
   }
   /** Inject the latest HKO observation (REAL) as the rainfall baseline; null reverts to synthetic. */
+  setNowcast(n: Nowcast | null) {
+    setNowcast(n);
+  }
+
   setLive(r: LiveRain | null) {
     setLiveRain(r);
   }

@@ -23,7 +23,7 @@ import {
   MockWeatherDataProvider,
 } from "@/mock/repositories";
 import { MockSimulationProvider } from "@/mock/MockSimulationProvider";
-import { featuresFor, projectedRain24, rainRateAt } from "@/mock/signals";
+import { featuresFor, nowcastForSlope, projectedRain24, rainRateAt } from "@/mock/signals";
 import { getDataset } from "@/mock/generate";
 
 export interface ServiceRegistry {
@@ -54,6 +54,7 @@ function buildRegistry(): ServiceRegistry {
         return sum;
       },
       assetById: (id) => assetById.get(id),
+      nowcastMm: (slope, plusH) => nowcastForSlope(slope, plusH),
     }
   );
 

@@ -298,16 +298,40 @@ export function elementsOf(
 
 // ---------- 6. Risk ----------
 
+/**
+ * Annual rainfall climatology from the return-period table: the rate of storms in each R24 class is the difference of
+ * exceedance rates 1/T between successive points; storms of 50–100 mm are taken at 2 a year (assumption).
+ */
+export const ANNUAL_RAIN_CLASSES: { r24Mm: number; ratePerYear: number }[] = (() => {
+  const pts = RETURN_PERIOD_POINTS;
+  const out: { r24Mm: number; ratePerYear: number }[] = [{ r24Mm: 75, ratePerYear: 2 - 1 / pts[0][1] }];
+  for (let i = 0; i < pts.length; i++) {
+    const rate = 1 / pts[i][1] - (i + 1 < pts.length ? 1 / pts[i + 1][1] : 0);
+    const mid = i + 1 < pts.length ? (pts[i][0] + pts[i + 1][0]) / 2 : pts[i][0];
+    out.push({ r24Mm: mid, ratePerYear: rate });
+  }
+  return out;
+})();
+
+/** Annual failure probability of a slope: Σ over rainfall classes of (storms per year × P(H | R_class)), climatological — no monitoring evidence. */
+export function annualOccurrence(x: Omit<OccurrenceInputs, "r24Mm" | "evidence" | "antecedent3dMm">): number {
+  let lambda = 0;
+  for (const c of ANNUAL_RAIN_CLASSES) lambda += c.ratePerYear * occurrence({ ...x, r24Mm: c.r24Mm }).p;
+  return 1 - Math.exp(-lambda);
+}
+
 export interface RiskChain {
   r24Mm: number;
   returnPeriodY: number;
+  pAnnual: number; // annual failure probability (climatology)
+  pllAnnual: number; // expected fatalities per year = PLL_event / P_event × P_annual
   occurrence: OccurrenceResult;
   magnitude: MagnitudeBin[];
   consequencePerClass: number[]; // expected fatalities given a landslide of each class
   pllEvent: number; // expected fatalities in this storm = P_H · Σ_j P_j · C_j
   pMajor: number; // per-storm probability of a failure ≥ 50 m³
   irEvent: number; // most exposed resident (ground floor of the nearest block): P_H · Σ_j P_j · V_j(d_min) · shield_j · presence
-  irAnnual: number; // irEvent / return period of the current 24-h rainfall (indicative)
+  irAnnual: number; // annual individual risk = irEvent / P_event × P_annual
   mostExposedM: number | null;
   elements: { residents: number; buildings: number; facilities: number; roads: number };
 }
@@ -318,7 +342,8 @@ export function riskChain(
   elements: ElementAtRisk[],
   reachM: number,
   barrier: number,
-  r24Mm: number
+  r24Mm: number,
+  pAnnual = 0
 ): RiskChain {
   const consequencePerClass = mags.map((b) => consequenceOf(elements, b, reachM, barrier));
   const pllEvent = occ.p * mags.reduce((s, b, i) => s + b.p * consequencePerClass[i], 0);
@@ -326,16 +351,19 @@ export function riskChain(
   const nearest = persons.length ? Math.min(...persons.map((e) => e.distM)) : elements.some((e) => e.kind === "residents") ? Math.max(PROXIMITY_STEP_M, reachM / 2) : null;
   const irEvent = nearest === null ? 0 : occ.p * mags.reduce((s, b) => s + b.p * proximityVulnerability(b.volumeM3, nearest) * BUILDING_PROTECTION[b.cls] * (1 - BARRIER_RETENTION[b.cls] * barrier), 0) * RESIDENT_PRESENCE;
   const T = returnPeriodYears(r24Mm);
+  const scale = occ.p > 0 ? pAnnual / occ.p : 0;
   return {
     r24Mm,
     returnPeriodY: T,
+    pAnnual,
+    pllAnnual: pllEvent * scale,
     occurrence: occ,
     magnitude: mags,
     consequencePerClass,
     pllEvent,
     pMajor: occ.p * mags.filter((b) => b.cls === "major" || b.cls === "very-major").reduce((s, b) => s + b.p, 0),
     irEvent,
-    irAnnual: irEvent / T,
+    irAnnual: irEvent * scale,
     mostExposedM: nearest === null ? null : Math.round(nearest),
     elements: {
       residents: elements.filter((e) => e.kind === "residents").reduce((s, e) => s + (e.people ?? 0), 0),
@@ -355,4 +383,173 @@ export function scoreFromChain(p: number, pllEvent: number): { score: number; ha
   const hazardIdx = clamp((Math.log10(Math.max(1e-12, p)) - m.hazardLo) / (m.hazardHi - m.hazardLo), 0, 1);
   const consIdx = clamp((Math.log10(Math.max(1e-12, pllEvent)) - m.consLo) / (m.consHi - m.consLo), 0, 1);
   return { score: 100 * (m.wHazard * hazardIdx + m.wCons * consIdx), hazardIdx, consIdx };
+}
+
+// ---------- 8. Uncertainty on the chain ----------
+//
+// The twin carries P(H | R) as a distribution, not a point: a normal on the log-odds whose variance is the sum of
+// the parts the open data cannot pin down. Each part is what one kind of observation would collapse — the hook for
+// the value-of-information layer below (Stage A/B of the decision-aware active sensing framework).
+
+export interface UncertaintyParts {
+  correlation: number; // scatter of the population correlation around this slope (GEO Report 144: correlation ~0.9)
+  material: number; // soil / rock, formation age, strength — not in the open register
+  hydrology: number; // pore pressure, groundwater — synthetic today
+  geometry: number; // survey age
+  mitigation: number; // condition of the works
+}
+export interface Uncertainty {
+  parts: UncertaintyParts;
+  sigma: number; // ln-odds standard deviation = sqrt(sum of parts squared)
+  p5: number;
+  p95: number;
+}
+/** Prior standard deviations (ln-odds) and what collapses them. */
+export const UNCERTAINTY_PRIOR: UncertaintyParts = { correlation: 0.55, material: 0.6, hydrology: 0.5, geometry: 0.15, mitigation: 0.4 };
+/** Consequence-side uncertainty (ln): residents estimate and vulnerability factors. */
+export const CONSEQUENCE_SIGMA = { elementsWithBlocks: 0.25, elementsCensusOnly: 0.45, vulnerability: 0.5 } as const;
+
+export interface UncertaintyInputs {
+  pastFailures: number;
+  geometryAgeDays?: number;
+  mitigationInspected?: boolean;
+  materialKnown?: boolean;
+  hydrologyMeasured?: boolean;
+  kinematicsMeasured?: boolean;
+}
+
+export function uncertaintyOf(p: number, x: UncertaintyInputs): Uncertainty {
+  const u = UNCERTAINTY_PRIOR;
+  const parts: UncertaintyParts = {
+    correlation: x.kinematicsMeasured ? 0.35 : x.pastFailures > 0 ? u.correlation * 0.8 : u.correlation,
+    material: x.materialKnown ? 0.25 : x.pastFailures > 0 ? u.material * 0.7 : u.material,
+    hydrology: x.hydrologyMeasured ? 0.2 : u.hydrology,
+    geometry: (x.geometryAgeDays ?? 0) > 730 ? 0.3 : u.geometry,
+    mitigation: x.mitigationInspected ? 0.15 : u.mitigation,
+  };
+  const sigma = Math.sqrt(Object.values(parts).reduce((s, v) => s + v * v, 0));
+  const z = logit(clamp(p, 1e-9, 0.999));
+  return { parts, sigma, p5: sigmoid(z - 1.645 * sigma), p95: sigmoid(z + 1.645 * sigma) };
+}
+
+/** Lognormal factor range for the expected fatalities: occurrence sigma (ln-odds, close to ln p for small p) plus consequence sigma. */
+export function pllRange(pll: number, occSigma: number, hasBlocks: boolean): { p5: number; p95: number; sigma: number } {
+  const s = Math.sqrt(occSigma ** 2 + (hasBlocks ? CONSEQUENCE_SIGMA.elementsWithBlocks : CONSEQUENCE_SIGMA.elementsCensusOnly) ** 2 + CONSEQUENCE_SIGMA.vulnerability ** 2);
+  return { p5: pll * Math.exp(-1.645 * s), p95: pll * Math.exp(1.645 * s), sigma: s };
+}
+
+// ---------- 9. Value of information: what to observe next ----------
+//
+// Decision for the current storm: take a precautionary action (close the toe road / evacuate the nearest block and
+// send a crew) or wait. Loss(wait | p) = p * K * VSL with K the expected fatalities given a failure and VSL the value
+// of a statistical life; loss(act) = the action's cost. Under the lognormal belief on p, an observation that would
+// shrink sigma to sigma' has the preposterior value
+//     VOI = E_prior[min(C_act, E[p] K VSL)] - E_m[min(C_act, E[p | m] K VSL)]
+// (Raiffa & Schlaifer 1961), evaluated by Gauss-Hermite quadrature over the posterior-mean distribution. The
+// ranking criterion is J = VOI / (cost + lambda * time) - the proposal's eq. (2) with energy and risk folded into cost.
+
+export interface ObservationOption {
+  id: string;
+  label: string;
+  costHKDm: number; // assumption
+  hours: number; // time to result (assumption)
+  collapses: Partial<UncertaintyParts>; // posterior sigma of the parts it informs
+}
+export const OBSERVATIONS: ObservationOption[] = [
+  { id: "inspection", label: "Engineer site inspection", costHKDm: 0.02, hours: 4, collapses: { mitigation: 0.15, geometry: 0.1 } },
+  { id: "uav-lidar", label: "UAV / LiDAR survey", costHKDm: 0.08, hours: 8, collapses: { geometry: 0.05, mitigation: 0.25 } },
+  { id: "piezometer", label: "Piezometer + moisture probes", costHKDm: 0.15, hours: 24, collapses: { hydrology: 0.2 } },
+  { id: "gnss", label: "Displacement monitoring (GNSS / inclinometer)", costHKDm: 0.3, hours: 48, collapses: { correlation: 0.35, hydrology: 0.4 } },
+  { id: "gi", label: "Ground investigation (borehole + lab)", costHKDm: 0.8, hours: 720, collapses: { material: 0.25, hydrology: 0.3 } },
+];
+export const VOI_PARAMS = { vslHKDm: 30, precautionCostHKDm: 0.08, lambdaPerHourHKDm: 0.002 } as const; // VSL after HK transport appraisal practice; precaution = a day's road closure + crew
+
+/** Gauss-Hermite nodes and weights (n = 21) for integrals of f(x) exp(-x^2), from the Hermite Jacobi matrix (Golub-Welsch). */
+const GH: [number, number][] = (() => {
+  const n = 21;
+  const d = new Array<number>(n).fill(0);
+  const e = new Array<number>(n).fill(0).map((_, i) => (i < n - 1 ? Math.sqrt((i + 1) / 2) : 0));
+  const z: number[][] = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => (i === j ? 1 : 0)));
+  // implicit QL with Wilkinson shifts on the symmetric tridiagonal matrix
+  for (let l = 0; l < n; l++) {
+    let iter = 0;
+    for (;;) {
+      let m = l;
+      while (m < n - 1 && Math.abs(e[m]) > 1e-15 * (Math.abs(d[m]) + Math.abs(d[m + 1]))) m++;
+      if (m === l || iter++ > 80) break;
+      let g = (d[l + 1] - d[l]) / (2 * e[l]);
+      let r = Math.hypot(g, 1);
+      g = d[m] - d[l] + e[l] / (g + (g >= 0 ? r : -r));
+      let s = 1, c = 1, p = 0;
+      let i = m - 1;
+      let underflow = false;
+      for (; i >= l; i--) {
+        let f = s * e[i];
+        const b = c * e[i];
+        r = Math.hypot(f, g);
+        e[i + 1] = r;
+        if (r === 0) { d[i + 1] -= p; e[m] = 0; underflow = true; break; }
+        s = f / r; c = g / r; g = d[i + 1] - p; r = (d[i] - g) * s + 2 * c * b; p = s * r; d[i + 1] = g + p; g = c * r - b;
+        for (let k = 0; k < n; k++) { f = z[k][i + 1]; z[k][i + 1] = s * z[k][i] + c * f; z[k][i] = c * z[k][i] - s * f; }
+      }
+      if (underflow) continue;
+      d[l] -= p; e[l] = g; e[m] = 0;
+    }
+  }
+  return d.map((x, i) => [x, Math.sqrt(Math.PI) * z[0][i] * z[0][i]] as [number, number]);
+})();
+
+/** E_m[ min(C, VSL K E[p | m]) ]: the expected loss after an observation that leaves sigmaPost of the prior sigma. */
+function preposteriorLoss(pHat: number, sigma: number, sigmaPost: number, K: number, C: number, vsl: number): number {
+  const tau2 = Math.max(0, sigma * sigma - sigmaPost * sigmaPost); // variance of the posterior log-mean
+  let sum = 0;
+  for (const [x, w] of GH) {
+    const eps = Math.sqrt(2 * tau2) * x - tau2 / 2; // ln-space shift with E[exp(eps)] = 1
+    const postMean = pHat * Math.exp(eps) * Math.exp((sigmaPost * sigmaPost) / 2);
+    sum += w * Math.min(C, vsl * K * Math.min(1, postMean));
+  }
+  return sum / Math.sqrt(Math.PI);
+}
+
+export interface VoiOption { id: string; label: string; costHKDm: number; hours: number; voiHKDm: number; ratio: number; sigmaAfter: number }
+export interface VoiResult {
+  decision: "act" | "wait" | "upgrade" | "defer";
+  expectedLossWaitHKDm: number;
+  actCostHKDm: number;
+  evpiHKDm: number; // value of perfect information on P(H | R)
+  options: VoiOption[]; // sorted by ratio
+  best: VoiOption | null; // the highest-ratio observation (null only without options)
+  worthIt: boolean; // best.ratio > 1 — it pays for itself
+  enough: boolean; // stop: even perfect information is worth less than the cheapest look
+}
+
+/** The slope-upgrade decision (Planning horizon): an LPM-type upgrade now against the expected loss over its design life. */
+export const UPGRADE_PARAMS = { costHKDm: 5, horizonYears: 25 } as const;
+
+/** Storm decision: precaution now vs wait, on the per-storm belief. */
+export function valueOfInformation(pHat: number, unc: Uncertainty, consequenceGivenFailure: number, params = VOI_PARAMS): VoiResult {
+  return decisionVoi(pHat, unc, consequenceGivenFailure * params.vslHKDm, params.precautionCostHKDm, params.lambdaPerHourHKDm, "act", "wait");
+}
+
+/** Upgrade decision: upgrade now vs defer, on the annual belief over the design life (undiscounted). */
+export function upgradeVoi(pAnnual: number, unc: Uncertainty, consequenceGivenFailure: number, params = UPGRADE_PARAMS, voi = VOI_PARAMS): VoiResult {
+  return decisionVoi(pAnnual, unc, consequenceGivenFailure * voi.vslHKDm * params.horizonYears, params.costHKDm, voi.lambdaPerHourHKDm, "upgrade", "defer");
+}
+
+function decisionVoi(pHat: number, unc: Uncertainty, lossPerFailureHKDm: number, C: number, lambda: number, actLabel: VoiResult["decision"], waitLabel: VoiResult["decision"]): VoiResult {
+  const K = lossPerFailureHKDm, vsl = 1;
+  const priorMean = Math.min(1, pHat * Math.exp((unc.sigma * unc.sigma) / 2));
+  const lossWait = vsl * K * priorMean;
+  const lossNow = Math.min(C, lossWait);
+  const evpi = Math.max(0, lossNow - preposteriorLoss(pHat, unc.sigma, 0, K, C, vsl));
+  const options: VoiOption[] = OBSERVATIONS.map((o) => {
+    const parts = { ...unc.parts } as UncertaintyParts;
+    for (const [k, v] of Object.entries(o.collapses) as [keyof UncertaintyParts, number][]) parts[k] = Math.min(parts[k], v);
+    const sigmaAfter = Math.sqrt(Object.values(parts).reduce((s, v) => s + v * v, 0));
+    const voi = Math.max(0, lossNow - preposteriorLoss(pHat, unc.sigma, sigmaAfter, K, C, vsl));
+    return { id: o.id, label: o.label, costHKDm: o.costHKDm, hours: o.hours, voiHKDm: voi, sigmaAfter, ratio: voi / (o.costHKDm + lambda * o.hours) };
+  }).sort((a, b) => b.ratio - a.ratio);
+  const best = options[0] ?? null;
+  const cheapest = Math.min(...OBSERVATIONS.map((o) => o.costHKDm));
+  return { decision: lossWait > C ? actLabel : waitLabel, expectedLossWaitHKDm: lossWait, actCostHKDm: C, evpiHKDm: evpi, options, best, worthIt: !!best && best.ratio > 1, enough: evpi < cheapest };
 }

@@ -81,7 +81,7 @@ export default function DataSourcesPane() {
   const loaded = DATA_SOURCES.filter((d) => status[d.id]?.ok).length;
 
   return (
-    <div style={{ maxWidth: 1180 }}>
+    <div>
       <h1>Data Sources</h1>
       <div className="sub">
         Every dataset the twin touches — what it is, how it reaches the running app, whether it is real, and how fresh it is. {real} of {DATA_SOURCES.length} sources are real

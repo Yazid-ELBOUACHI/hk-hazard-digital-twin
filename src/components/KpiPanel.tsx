@@ -9,6 +9,8 @@ import Collapsible from "./ui/Collapsible";
 import Term from "./ui/Term";
 import type { ReactNode } from "react";
 
+const fmtSmall = (v: number) => (v >= 10 ? fmtInt(v) : v >= 1 ? v.toFixed(1) : v.toFixed(2));
+
 function TrendMark({ t }: { t?: Trend }) {
   if (!t || t === "stable") return <span className="kpi-trend trend-stable">→</span>;
   return <span className={`kpi-trend trend-${t}`}>{t === "up" ? "↑" : "↓"}</span>;
@@ -31,11 +33,11 @@ function Tile({ label, value, unit, color, trend, sub, wide }: { label: ReactNod
   );
 }
 
-function Row({ label, value, color, trend }: { label: ReactNode; value: string; color: string; trend?: Trend }) {
+function Row({ label, value, color, trend, title }: { label: ReactNode; value: string; color: string; trend?: Trend; title?: string }) {
   return (
-    <div className="kpi-row">
+    <div className="kpi-row" title={title}>
       <span className="dot" style={{ background: color }} />
-      {label}
+      <span className="l">{label}</span>
       <span className="v">{value}</span>
       <TrendMark t={trend} />
     </div>
@@ -63,12 +65,16 @@ export default function KpiPanel() {
           <Row label="Requiring monitoring" value={String(kpi.monitoringRequired)} color="var(--accent)" />
           {kpi.expectedLandslides !== undefined && (
             <>
-              <Row label={<Term id="expected-landslides" />} value={kpi.expectedLandslides >= 10 ? fmtInt(kpi.expectedLandslides) : kpi.expectedLandslides >= 1 ? kpi.expectedLandslides.toFixed(1) : kpi.expectedLandslides.toFixed(2)} color="var(--accent)" />
-              <Row label={<Term id="pll" />} value={(kpi.pllEvent ?? 0) >= 0.1 ? (kpi.pllEvent ?? 0).toFixed(1) : (kpi.pllEvent ?? 0).toExponential(1)} color="var(--risk-high)" />
+              <Row
+                label={<Term id="expected-landslides">Expected landslides</Term>}
+                value={fmtSmall(kpi.expectedLandslides)}
+                title={kpi.expectedLandslides5 !== undefined ? `This storm, Σ P(H|R) over the inventory · 5–95 %: ${fmtSmall(kpi.expectedLandslides5)}–${fmtSmall(kpi.expectedLandslides95 ?? 0)} · full breakdown in Reports → Storm Report` : undefined}
+                color="var(--accent)"
+              />
+              <Row label={<Term id="pll">Expected fatalities</Term>} value={(kpi.pllEvent ?? 0) >= 0.1 ? (kpi.pllEvent ?? 0).toFixed(1) : (kpi.pllEvent ?? 0).toExponential(1)} color="var(--risk-high)" title="This storm, Σ PLL over the inventory — see Reports → Storm Report" />
             </>
           )}
         </div>
-        <div className="row-hint">Σ over the inventory of the PoLA chain P(H|R)·P(M|H,R)·P(L|H,M)·V·E — see Data sources → How it is calculated.</div>
       </div>
 
       <div className="panel">
@@ -105,6 +111,11 @@ export default function KpiPanel() {
           />
           <Tile label="Next 24 h" value={String(kpi.forecastRainfallMm)} unit="mm" color="var(--accent)" sub="synthetic forecast" />
         </div>
+        {kpi.nowcast2hMm !== undefined && (
+          <div className="kpi-rows" style={{ marginTop: 6 }}>
+            <Row label={<Term id="nowcast">Next 2 h · HKO nowcast</Term>} value={`${kpi.nowcast2hMm} mm`} color="var(--accent)" title={`HKO gridded rainfall nowcast, territory mean over the twin's stations${weather?.nowcast ? ` · issued ${weather.nowcast.updated.slice(11, 16)} HKT` : ""} · real data`} />
+          </div>
+        )}
       </div>
 
       <div className="panel" style={{ paddingTop: 8 }}>

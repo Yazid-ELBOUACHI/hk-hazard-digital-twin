@@ -177,7 +177,7 @@ function coreModel(slope: Slope, p: ScenarioParams): Omit<SimulationResult, "job
 function makeFrames(slope: Slope, res: ReturnType<typeof coreModel>, p: ScenarioParams): SimulationFrame[] {
   const frames: SimulationFrame[] = [];
   const totalSec = 60;
-  const failing = res.failureLikely || res.failureProbability > 0.35;
+  const failing = res.failureLikely;
   const seismic = (p.seismicPga ?? 0) >= 0.05;
   // an earthquake cuts the slow build-up short: shaking hits at t=20 and the mass is moving within seconds
   const tInit = seismic ? 20 : 26, tRun = seismic ? 23 : 30, tImpact = seismic ? 41 : 48, tSettled = seismic ? 50 : 56;

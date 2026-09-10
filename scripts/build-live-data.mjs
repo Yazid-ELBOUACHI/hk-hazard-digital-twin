@@ -291,6 +291,17 @@ async function bakeRain() {
     .slice(0, 40)
     .map((d) => ({ d, maxX10: dayMax[d], gauge: dayMaxGauge[d], meanX10: dayMean[d], incidents: dayIncidents[d] }));
 
+  // per-gauge totals on the storm days, so the twin can replay each storm through its risk chain (validation)
+  const stormIdx = new Map(storms.map((s, k) => [s.d, k]));
+  const stormGauge = new Uint16Array(storms.length * nG); // mm ×10, 0 = no record
+  for (const [d, gid, rain] of rows) {
+    const k = stormIdx.get(dayOf(d));
+    if (k === undefined) continue;
+    const v = parseFloat(rain);
+    const g = gIdx.get(gid);
+    if (!Number.isFinite(v) || v < 0 || g === undefined) continue;
+    stormGauge[k * nG + g] = Math.min(65535, Math.round(v * 10));
+  }
   console.log(`  ${nG} gauges · ${valid.toLocaleString()} valid daily values · ${nD} days to ${lastDate} · ${dated.toLocaleString()} dated incidents`);
   console.log(`  wettest day: ${new Date(EPOCH_MS + storms[0].d * 86400_000).toISOString().slice(0, 10)} ${storms[0].maxX10 / 10} mm at ${gauges[storms[0].gauge].name}`);
 
@@ -304,6 +315,7 @@ async function bakeRain() {
 //   monthlyX10[g*years*12+m]  monthly total at gauge g, mm ×10
 //   dayMaxX10[d] / dayMeanX10[d] / dayGauges[d]   territory max, mean and number of reporting gauges, per day
 //   dayIncidents[d]           landslide incidents reported on that day (CEDD incident database)
+//   stormGaugeX10[k*gauges+g] daily total at gauge g on the k-th storm day of \`storms\`, mm ×10 (0 = no record)
 
 export interface RainGauge { id: string; name: string; lon: number; lat: number; from: number; to: number }
 export interface StormDay { d: number; maxX10: number; gauge: number; meanX10: number; incidents: number }
@@ -313,6 +325,7 @@ export interface RainfallBake {
   annualMaxX10: string; annualTotalMm: string; monthlyX10: string;
   dayMaxX10: string; dayMeanX10: string; dayGauges: string; dayIncidents: string;
   storms: StormDay[];
+  stormGaugeX10: string;
 }`,
     `export const RAINFALL: RainfallBake = ${JSON.stringify({
       epochYear: EPOCH_YEAR, years: nY, days: nD, lastDate,
@@ -320,6 +333,7 @@ export interface RainfallBake {
       annualMaxX10: b64(annualMax), annualTotalMm: b64(annualTotal), monthlyX10: b64(monthly),
       dayMaxX10: b64(dayMax), dayMeanX10: b64(dayMean), dayGauges: b64(dayN), dayIncidents: b64(dayIncidents),
       storms,
+      stormGaugeX10: b64(stormGauge),
     })};`
   );
 

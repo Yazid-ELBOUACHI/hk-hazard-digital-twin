@@ -9,6 +9,7 @@ import maplibregl from "maplibre-gl";
 import type { StyleSpecification, LayerSpecification } from "maplibre-gl";
 import { useStore, BasemapId } from "@/state/store";
 import { registry } from "@/core/registry";
+import { simulationMoment } from "@/core/simulationScene";
 import { HK_CENTER } from "@/mock/geo";
 
 /** The opening (and "reset view") camera: Hong Kong Island from the south, tilted over the terrain. */
@@ -17,6 +18,7 @@ import { RISK_COLORS, Slope, RiskAssessment, RiskCategory, Asset, Incident, Simu
 import { offsetM } from "@/mock/geo";
 import { fetchSlopesInBbox, fetchBlackspots, fetchLandslides, fetchLpmWorks, fetchEntliInBbox, fetchRoadsInBbox } from "@/live/csdi";
 import { loadRealBarriers, barrierPolygonFC, barrierPointFC } from "@/live/realBarriers";
+import { buildStormReport, stormGridFC } from "@/decision/stormReport";
 import type { LiveRain } from "@/live/hko";
 import { setMapInteracting, yieldForMap } from "@/core/schedule";
 import { slopeCamera } from "@/core/mapSelection";
@@ -66,13 +68,13 @@ const DEM_TILES = ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/
 const OWN_SOURCE_IDS = [
   "dem", "dem-hillshade", "slopes", "slopes-blobs", "slopes-pts", "roads", "buildings", "drainage", "incidents", "sensors", "mitigated", "historical", "rainfall-pts", "flood",
   "runout", "runout-front", "selected", "csdi-slopes", "csdi-blackspots", "csdi-landslides",
-  "csdi-lpm", "csdi-lpm-pts", "cedd-barriers", "cedd-barriers-pts", "entli-grid", "csdi-entli-crowns", "csdi-entli-trails", "live-rain", "csdi-roads", "facilities-local", "building-blocks",
+  "csdi-lpm", "csdi-lpm-pts", "cedd-barriers", "cedd-barriers-pts", "storm-grid", "entli-grid", "csdi-entli-crowns", "csdi-entli-trails", "live-rain", "csdi-roads", "facilities-local", "building-blocks",
 ];
 const OWN_LAYER_IDS = [
   "flood-fill", "flood-line", "rain-heat", "entli-grid-fill", "csdi-slopes-fill", "csdi-slopes-line", "csdi-lpm-fill", "csdi-lpm-line",
   "slopes-blobs-fill", "slopes-pt", "slopes-fill", "slopes-line", "uncertainty-fill", "csdi-roads-line", "roads-line",
   "building-blocks-pt", "facilities-local-pt", "buildings-pt", "drainage-pt", "mitigated-pt", "historical-pt", "sensors-pt", "incidents-pt", "csdi-landslides-pt", "csdi-blackspots-pt",
-  "csdi-lpm-pt", "cedd-barriers-fill", "cedd-barriers-line", "cedd-barriers-pt", "csdi-entli-trails-line", "csdi-entli-crowns-pt", "live-rain-pt",
+  "csdi-lpm-pt", "cedd-barriers-fill", "cedd-barriers-line", "cedd-barriers-pt", "storm-grid-fill", "storm-grid-line", "csdi-entli-trails-line", "csdi-entli-crowns-pt", "live-rain-pt",
   "runout-fill", "runout-line", "runout-front-pt", "selected-fill", "selected-halo", "selected-line",
 ];
 
@@ -407,6 +409,7 @@ function mountOwnLayers(map: maplibregl.Map) {
   map.addSource("csdi-landslides", { type: "geojson", data: EMPTY_FC });
   map.addSource("csdi-lpm", { type: "geojson", data: EMPTY_FC });
   map.addSource("csdi-lpm-pts", { type: "geojson", data: EMPTY_FC });
+  map.addSource("storm-grid", { type: "geojson", data: EMPTY_FC });
   map.addSource("cedd-barriers", { type: "geojson", data: EMPTY_FC });
   map.addSource("cedd-barriers-pts", { type: "geojson", data: EMPTY_FC });
   map.addSource("entli-grid", { type: "geojson", data: EMPTY_FC });
@@ -425,6 +428,16 @@ function mountOwnLayers(map: maplibregl.Map) {
       "fill-opacity": ["interpolate", ["linear"], ["zoom"], 9, 0.6, 13.5, 0.15],
     },
   });
+
+  // PoLA storm report — expected landslides per GEO 750 × 600 m cell, drawn under everything else
+  map.addLayer({
+    id: "storm-grid-fill", type: "fill", source: "storm-grid", layout: { visibility: "none" },
+    paint: {
+      "fill-color": ["interpolate", ["linear"], ["get", "expected"], 0.001, "#fbe9e7", 0.01, "#f6b8a6", 0.05, "#e8744f", 0.2, "#c93a24", 1, "#7a1410"],
+      "fill-opacity": 0.55,
+    },
+  });
+  map.addLayer({ id: "storm-grid-line", type: "line", source: "storm-grid", layout: { visibility: "none" }, paint: { "line-color": "#7a1410", "line-opacity": 0.35, "line-width": 0.6 } });
 
   // CEDD registered man-made slopes — real catalogue polygons, drawn under the synthetic risk layers
   map.addLayer({
@@ -810,7 +823,8 @@ export default function MapView() {
         const rain = attachRain3d(map);
         rain3dRef.current = rain;
         const s = useStore.getState();
-        rain.setEnabled(s.layers.rain3d && s.map3d);
+        rain.setEnabled((s.layers.rain3d || s.sim3dActive) && s.map3d);
+        if (s.sim3dActive && s.simResult) rain.setOverride(s.simResult.params.rainfallMm / Math.max(1, s.simResult.params.rainfallDurationH));
         rain.setIntensity(rainRateAt(s.gameTime));
       });
       void import("@/map/debris3d").then(({ attachDebris3d }) => {
@@ -819,9 +833,14 @@ export default function MapView() {
         debris3dRef.current = debris;
         // a playback that was running when the map was rebuilt (basemap switch, hot reload) carries on
         const s = useStore.getState();
-        if (s.sim3dActive && s.simResult?.failureLikely && s.map3d) {
+        if (s.sim3dActive && s.simResult && s.map3d) {
           sim3dResultRef.current = s.simResult;
-          debris.show(s.simResult, s.slopes.find((sl) => sl.id === s.simResult!.slopeId));
+          debris.show(s.simResult, s.slopes.find((sl) => sl.id === s.simResult!.slopeId), () => {
+            const st = useStore.getState();
+            if (!st.sim3dActive || st.simResult !== s.simResult) return;
+            debris.setTime(st.animTimeSec);
+            useStore.setState({ sim3dReady: true, animPlaying: !st.sim3dReady || st.animPlaying });
+          });
           debris.setTime(s.animTimeSec);
           rain3dRef.current?.setOverride(s.simResult.params.rainfallMm / Math.max(1, s.simResult.params.rainfallDurationH));
         }
@@ -1034,6 +1053,7 @@ export default function MapView() {
     if (!map || !loadedRef.current) return;
     const timer = setTimeout(() => {
       void applyRiskState(map, slopes, assessments, stormMode, stormHorizonH, useStore.getState().gameTime);
+      refreshStormGrid(map);
     }, 60);
     return () => clearTimeout(timer);
   }, [slopes, assessments, stormMode, stormHorizonH]);
@@ -1044,7 +1064,8 @@ export default function MapView() {
     if (!map || !loadedRef.current) return;
     applyVisibility(map, layers);
     syncCsdiData(map, layers);
-  }, [layers]);
+    if (layers.stormGrid) refreshStormGrid(map);
+  }, [layers, sim3dActive, mapLoaded]);
 
   // ---- legend-driven risk class filter ----
   useEffect(() => {
@@ -1058,6 +1079,11 @@ export default function MapView() {
     const map = mapRef.current;
     if (!map || !viewCmd) return;
     switch (viewCmd.type) {
+      case "scene":
+      case "source":
+      case "toe":
+        debris3dRef.current?.focus(viewCmd.type);
+        break;
       case "rotate":
         map.easeTo({ bearing: map.getBearing() + (viewCmd.delta ?? 30), duration: 500 });
         break;
@@ -1172,15 +1198,21 @@ export default function MapView() {
   }, [liveRain]);
 
   useEffect(() => {
-    rain3dRef.current?.setEnabled(layers.rain3d && map3d);
-  }, [layers.rain3d, map3d, mapLoaded]);
+    rain3dRef.current?.setEnabled((layers.rain3d || sim3dActive) && map3d);
+  }, [layers.rain3d, sim3dActive, map3d, mapLoaded]);
 
   // ---- 3D scenario playback: the engine's result as a debris flow over the terrain ----
   useEffect(() => {
     const d = debris3dRef.current;
     if (!d) return;
-    const show = sim3dActive && !!simResult?.failureLikely && map3d;
+    const show = sim3dActive && !!simResult && map3d;
     const map = mapRef.current;
+    if (map?.getLayer("selected-fill")) {
+      const color = show ? (simResult!.failureLikely ? "#ffbf59" : "#36d6ac") : "#00d9ff";
+      map.setPaintProperty("selected-fill", "fill-color", color);
+      map.setPaintProperty("selected-fill", "fill-opacity", show ? 0.2 + simulationMoment(simResult!, animTimeSec).saturation * 0.25 : 0.28);
+      map.setPaintProperty("selected-line", "line-color", color);
+    }
     const flat2d = (visible: boolean) => {
       for (const id of ["runout-fill", "runout-line", "runout-front-pt"]) if (map?.getLayer(id)) map.setLayoutProperty(id, "visibility", visible ? "visible" : "none");
     };
@@ -1196,7 +1228,12 @@ export default function MapView() {
     if (sim3dResultRef.current !== simResult) {
       sim3dResultRef.current = simResult;
       flat2d(false); // the flat corridor is the 2D reading of the same result; one flow on screen, not two
-      d.show(simResult, slopes.find((s) => s.id === simResult.slopeId));
+      d.show(simResult, slopes.find((s) => s.id === simResult.slopeId), () => {
+        const st = useStore.getState();
+        if (!st.sim3dActive || st.simResult !== simResult) return;
+        d.setTime(st.animTimeSec);
+        useStore.setState({ sim3dReady: true, animPlaying: !st.sim3dReady || st.animPlaying });
+      });
       rain3dRef.current?.setOverride(simResult.params.rainfallMm / Math.max(1, simResult.params.rainfallDurationH));
     } else if (animTimeSec < sim3dLastTRef.current - 1) {
       d.reset(); // rewind / restart: fresh people, vehicles and hit state
@@ -1214,6 +1251,7 @@ export default function MapView() {
 function applyVisibility(map: maplibregl.Map, layers: ReturnType<typeof useStore.getState>["layers"]) {
   const vis = (on: boolean) => (on ? "visible" : "none");
   const safe = (id: string, on: boolean) => {
+    if (useStore.getState().sim3dActive && id !== "buildings-3d" && id !== "roads-line" && id !== "csdi-roads-line") on = false;
     if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", vis(on));
   };
   safe("slopes-pt", layers.slopeRisk);
@@ -1242,6 +1280,8 @@ function applyVisibility(map: maplibregl.Map, layers: ReturnType<typeof useStore
   safe("csdi-lpm-fill", layers.csdiLpm);
   safe("csdi-lpm-line", layers.csdiLpm);
   safe("csdi-lpm-pt", layers.csdiLpm);
+  safe("storm-grid-fill", layers.stormGrid);
+  safe("storm-grid-line", layers.stormGrid);
   safe("cedd-barriers-fill", layers.csdiBarriers);
   safe("cedd-barriers-line", layers.csdiBarriers);
   safe("cedd-barriers-pt", layers.csdiBarriers);
@@ -1376,6 +1416,13 @@ async function ensureEntliGrid(map: maplibregl.Map) {
   setSrcData(map, "entli-grid", entliGridFC);
 }
 
+/** The PoLA storm-report grid from the current assessments — only when the layer is on. */
+function refreshStormGrid(map: maplibregl.Map) {
+  const st = useStore.getState();
+  if (!st.layers.stormGrid || !st.slopes.length || !st.assessments.size) return;
+  setSrcData(map, "storm-grid", stormGridFC(buildStormReport(st.slopes, st.assessments, st.weather, st.kpi, st.gameTime)));
+}
+
 /** Load whichever CSDI layers are toggled on (cached after first load). */
 function syncCsdiData(map: maplibregl.Map, layers: ReturnType<typeof useStore.getState>["layers"]) {
   if (layers.csdiBlackspots) {
@@ -1477,6 +1524,12 @@ function wireCsdiPopups(map: maplibregl.Map, popupFor: () => maplibregl.Popup) {
     foot("CEDD Catalogue of Slopes");
   wire("cedd-barriers-fill", barrierHtml);
   wire("cedd-barriers-pt", barrierHtml);
+  wire("storm-grid-fill", (p) => (
+    `<div style="font-weight:600">Expected landslides this storm: ${Number(p.expected).toFixed(3)}</div>` +
+    `<div style="font-size:10px">≥ 50 m³: ${Number(p.expectedMajor).toFixed(3)} · PLL ${p.pll} · ${p.slopes} inventory slope${p.slopes === 1 ? "" : "s"} in the cell</div>` +
+    `<div style="color:#6d7a8c;font-size:10px">GEO grid cell ${p.q}/${p.r} (750 × 600 m) · worst slope ${p.worst}</div>` +
+    `<div style="color:#6d7a8c;font-size:9px;letter-spacing:0.6px;font-weight:700">PoLA CHAIN · Σ P(H|R)</div>`
+  ));
   const ENTLI_TYPE: Record<string, string> = { R: "relict (pre-1963 baseline)", C: "recent · channelised", O: "recent · open hillslope", S: "recent · other" };
   wire("csdi-entli-crowns-pt", (p) => (
     `<div style="font-family:var(--mono);font-weight:600">${p.ENTLI_NO}</div>` +

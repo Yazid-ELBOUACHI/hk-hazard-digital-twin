@@ -17,6 +17,7 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import compression from "compression";
 import { liveRainHandler } from "./liveRain.js";
+import { liveNowcastHandler } from "./liveNowcast.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(__dirname, "..", "dist");
@@ -399,6 +400,8 @@ app.use((req, res, next) => {
 
 // Live HKO rainfall (proxy + rolling 24-h accumulation) — real data, session-gated like the app.
 app.get("/api/live/rainfall", (req, res) => void liveRainHandler(req, res));
+// HKO 2-hour gridded rainfall nowcast, reduced to the twin's stations — real data, session-gated like the app.
+app.get("/api/live/nowcast", (req, res) => void liveNowcastHandler(req, res));
 
 app.use(
   express.static(DIST, {

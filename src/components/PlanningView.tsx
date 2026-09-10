@@ -8,6 +8,7 @@ import { optimizePortfolio, Objective } from "@/decision/optimizer";
 import type { InterventionOption } from "@/core/types";
 import { fmtInt } from "@/core/format";
 import Collapsible from "./ui/Collapsible";
+import Term from "./ui/Term";
 
 const OBJECTIVES: { id: Objective; label: string; hint: string }[] = [
   { id: "risk", label: "Maximize risk reduction", hint: "Most risk points removed per dollar" },
@@ -53,13 +54,24 @@ export default function PlanningView() {
     return { rows, inProgress, elevatedPlus };
   }, [slopes, assessments]);
 
+  // value of information: the slopes where one observation would most change this storm's precautionary decision
+  const { voiRows, actNow, worthIt } = useMemo(() => {
+    const rows = slopes
+      .map((s) => ({ s, a: assessments.get(s.id)!, q: assessments.get(s.id)?.qra }))
+      .filter((x): x is { s: (typeof slopes)[number]; a: NonNullable<typeof x.a>; q: NonNullable<typeof x.q> } => !!x.a && !!x.q?.voiUpgrade?.best)
+      .sort((x, y) => y.q.voiUpgrade!.best!.voiHKDm - x.q.voiUpgrade!.best!.voiHKDm)
+      .slice(0, 12);
+    const act = slopes.filter((s) => assessments.get(s.id)?.qra?.voiUpgrade?.decision === "upgrade").length;
+    return { voiRows: rows, actNow: act, worthIt: rows.filter((r) => r.q.voiUpgrade!.worthIt).length };
+  }, [slopes, assessments]);
+
   return (
     <div className="page">
       <h1>Intervention Portfolio Optimizer</h1>
       <div className="sub">Where should a fixed mitigation budget go? Move the budget or change the objective — the portfolio updates instantly. Mock optimization on a synthetic risk score; population from the 2021 census.</div>
 
       {programmed.rows.length > 0 && (
-        <div className="card" style={{ maxWidth: 820 }}>
+        <div className="card">
           <h3>
             Already programmed by GEO — LPM works
             <span className="hint badge real">REAL · CEDD LPMitP</span>
@@ -105,7 +117,7 @@ export default function PlanningView() {
         </div>
       )}
 
-      <div className="card" style={{ maxWidth: 820 }}>
+      <div className="card">
         <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 22, alignItems: "end" }}>
           <div>
             <div className="stat-label" style={{ marginBottom: 6 }}>Available budget</div>
@@ -128,7 +140,7 @@ export default function PlanningView() {
       </div>
 
       {result && (
-        <div className="card" style={{ maxWidth: 820 }}>
+        <div className="card">
           <h3>Recommended portfolio</h3>
           <div className="tiles" style={{ gridTemplateColumns: "repeat(4, 1fr)", marginBottom: 12 }}>
             <div className="tile">
@@ -175,7 +187,42 @@ export default function PlanningView() {
         </div>
       )}
 
-      <div style={{ maxWidth: 820 }}>
+      {voiRows.length > 0 && (
+        <div className="card">
+          <h3>
+            Where to investigate next — <Term id="voi-upgrade">value of information for the upgrade decision</Term>
+            <span className="hint badge fresh">decision-aware sensing</span>
+          </h3>
+          <div className="sub" style={{ marginBottom: 8 }}>
+            For each slope the twin asks which investigation would most change the decision to upgrade it now (HK$5 M, 25-year horizon) or defer, per HK$ and hour it costs. {actNow} slope{actNow === 1 ? "" : "s"} warrant an upgrade on the prior alone; {worthIt} of the {voiRows.length} listed have an investigation that pays for itself.
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table className="data">
+              <thead>
+                <tr><th>Slope</th><th>Band</th><th>Annual P(failure)</th><th>Decision</th><th>Best investigation</th><th>VOI</th><th>Cost · time</th><th>× cost</th><th>Pays?</th></tr>
+              </thead>
+              <tbody>
+                {voiRows.map(({ s, a, q }) => (
+                  <tr key={s.id} style={{ cursor: "pointer" }} onClick={() => openSlope(s.id)} title={q.voiUpgrade!.options.map((o) => `${o.label}: VOI HK$${o.voiHKDm.toFixed(3)} M / HK$${o.costHKDm} M`).join("\n")}>
+                    <td style={{ fontFamily: "var(--mono)" }}>{s.id}<span className="muted" style={{ marginLeft: 6 }}>{s.district}</span></td>
+                    <td><span className={`badge ${a.category}`}>{a.category}</span></td>
+                    <td>{q.pAnnual.toExponential(1)} /y</td>
+                    <td style={{ color: q.voiUpgrade!.decision === "upgrade" ? "#ff8577" : undefined }}>{q.voiUpgrade!.decision}</td>
+                    <td>{q.voiUpgrade!.best!.label}</td>
+                    <td>HK${q.voiUpgrade!.best!.voiHKDm.toFixed(3)} M</td>
+                    <td>HK${q.voiUpgrade!.best!.costHKDm} M · {q.voiUpgrade!.best!.hours} h</td>
+                    <td>{q.voiUpgrade!.best!.ratio.toFixed(2)}</td>
+                    <td style={{ color: q.voiUpgrade!.worthIt ? "var(--risk-low)" : "var(--text-2)" }}>{q.voiUpgrade!.worthIt ? "yes" : "no"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="row-hint">VOI = expected loss now − expected loss after the investigation (preposterior, Raiffa–Schlaifer) on the annual failure belief, VSL HK$30 M × 25 y against a HK$5 M upgrade; investigation costs are assumptions. The storm-time precaution decision is on each slope's Overview. See Data sources → How it is calculated.</div>
+        </div>
+      )}
+
+      <div>
         <Collapsible title="Intervention catalog (indicative, synthetic)" storageKey="planning.catalog" summary={`${catalog.length} measures · HK$1.2–14 M`}>
           <table className="data">
             <thead>

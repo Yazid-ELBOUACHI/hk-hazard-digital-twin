@@ -85,7 +85,7 @@ export default function RainfallLandslidesPane() {
   if (!h || !derived) return <div className="card muted">Loading the GEO raingauge record (1984 → present)…</div>;
 
   return (
-    <div style={{ maxWidth: 1100 }}>
+    <div>
       <h1>
         Rainfall &amp; landslides <span className="badge real" style={{ verticalAlign: "middle", marginLeft: 8 }}>REAL DATA</span>
       </h1>
@@ -94,7 +94,7 @@ export default function RainfallLandslidesPane() {
         incident database (1983 → 2024). The empirical relation Hong Kong's rain-induced landslide models are built on.
       </div>
 
-      <div className="tiles" style={{ gridTemplateColumns: "repeat(4, 1fr)", maxWidth: 1100 }}>
+      <div className="tiles" style={{ gridTemplateColumns: "repeat(4, 1fr)" }}>
         <div className="tile">
           <div className="tile-l">Incidents on days ≥ 100 mm</div>
           <div className="tile-v" style={{ color: "var(--risk-high)" }}>

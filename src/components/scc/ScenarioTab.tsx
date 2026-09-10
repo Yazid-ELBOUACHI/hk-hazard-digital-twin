@@ -24,8 +24,6 @@ type NumKey = Exclude<keyof ScenarioParams, "interventions">;
 function startWatch3d() {
   const st = useStore.getState();
   st.setSim3d(true);
-  st.setAnim({ timeSec: 0, playing: false });
-  setTimeout(() => useStore.getState().sim3dActive && useStore.getState().setAnim({ playing: true }), 3200);
 }
 
 export default function ScenarioTab({ slope, assessment }: { slope: Slope; assessment: RiskAssessment }) {
@@ -63,6 +61,7 @@ export default function ScenarioTab({ slope, assessment }: { slope: Slope; asses
   const retPeriod = returnPeriodYears(mm24);
 
   const applyPreset = (p: (typeof PRESETS)[number]) => {
+    resetParams();
     setParams(p.patch);
     setPreset(p.id);
   };
@@ -89,14 +88,16 @@ export default function ScenarioTab({ slope, assessment }: { slope: Slope; asses
 
   const runAndWatch = async () => {
     await runScenario(selectedIv);
+    const jobId = useStore.getState().activeJob?.id;
     // the job finishes asynchronously; wait for it, then hand the result to the 3D playback
     for (let i = 0; i < 600; i++) {
       const j = useStore.getState().activeJob;
+      if (!j || j.id !== jobId || useStore.getState().selectedSlopeId !== slope.id) return;
       if (j && (j.status === "done" || j.status === "failed")) break;
       await new Promise((r) => setTimeout(r, 100));
     }
     const st = useStore.getState();
-    if (st.simResult?.failureLikely) startWatch3d();
+    if (st.activeJob?.status === "done" && st.simResult?.jobId === jobId && st.simResult?.slopeId === slope.id) startWatch3d();
   };
 
   const step = !result ? 1 : comparisons.length > 1 ? 3 : 2;
@@ -360,7 +361,7 @@ function ResultPanel({ slope, assessment }: { slope: Slope; assessment: RiskAsse
             <option value={4}>4×</option>
           </select>
         </div>
-        {result.failureLikely ? (
+        {(
           <button
             className="btn primary"
             style={{ width: "100%", marginTop: 10, padding: "10px 0" }}
@@ -369,10 +370,6 @@ function ResultPanel({ slope, assessment }: { slope: Slope; assessment: RiskAsse
           >
             🎬 Watch it in 3D on the map
           </button>
-        ) : (
-          <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
-            Failure is unlikely in this scenario, so there is no runout to play back in 3D.
-          </div>
         )}
       </div>
 

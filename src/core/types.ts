@@ -183,6 +183,15 @@ export interface WeatherState {
   stormEtaHours?: number;
   temperatureC: number;
   live?: LiveRainSummary; // set when the rainfall provenance above is real HKO data
+  nowcast?: NowcastSummary; // HKO 2-hour gridded rainfall nowcast (real), when the server proxy is reachable
+}
+
+export interface NowcastSummary {
+  updated: string; // HKO issue time (ISO, HKT)
+  steps: string[]; // ending times of the four 30-min windows
+  mean2h: number; // territory mean of the 2-h accumulation, mm
+  max2h: number;
+  stations: number;
 }
 
 export type IncidentKind = "landslide" | "rockfall" | "debris-flow" | "road-blockage" | "flooding";
@@ -249,11 +258,34 @@ export interface QraSummary {
   consequencePerClass: number[]; // expected fatalities given a landslide of each class (mobility × vulnerability × elements)
   pllEvent: number; // expected fatalities in this storm (societal risk per event)
   irEvent: number; // individual risk of the most exposed resident, this storm
-  irAnnual: number; // irEvent / return period — indicative, for comparison with HK criteria (1e-4 existing, 1e-5 new)
+  irAnnual: number; // annual individual risk (climatology over the rainfall classes) — against HK criteria 1e-4 existing, 1e-5 new
+  pAnnual: number; // annual failure probability
+  pllAnnual: number; // expected fatalities per year
   mostExposedM: number | null; // distance of the most exposed person
   elements: { residents: number; buildings: number; facilities: number; roads: number };
   hazardIdx: number; // 0..1 log map of pFailure
   consIdx: number; // 0..1 log map of pllEvent
+  // uncertainty — the belief on P(H | R) is a normal on the log-odds (src/core/pola.ts §8)
+  sigma: number; // ln-odds standard deviation
+  pFailure5: number;
+  pFailure95: number;
+  pll5: number;
+  pll95: number;
+  uncertaintyParts: Record<string, number>; // what the σ is made of: correlation, material, hydrology, geometry, mitigation
+  voi?: VoiSummary; // what to observe next for this storm's precaution (src/core/pola.ts §9)
+  voiUpgrade?: VoiSummary; // what to investigate next for the upgrade decision (25-y horizon)
+}
+
+/** Value-of-information summary for the precautionary decision on this slope in the current storm. */
+export interface VoiSummary {
+  decision: "act" | "wait" | "upgrade" | "defer";
+  expectedLossWaitHKDm: number;
+  actCostHKDm: number;
+  evpiHKDm: number;
+  enough: boolean;
+  worthIt: boolean; // the best observation pays for itself (VOI / (cost + λ·time) > 1)
+  best: { id: string; label: string; costHKDm: number; hours: number; voiHKDm: number; ratio: number } | null;
+  options: { id: string; label: string; costHKDm: number; hours: number; voiHKDm: number; ratio: number; sigmaAfter: number }[];
 }
 
 export interface RiskAssessment {
@@ -338,6 +370,9 @@ export interface SimulationResult {
 
 /** Live tally from the 3D playback of a scenario: what the animated front has reached so far. */
 export interface Sim3dImpact {
+  roadContext: string;
+  buildingsInScene: number;
+  terrainReady: boolean;
   buildings: number;
   roads: number;
   people: number;
@@ -427,7 +462,10 @@ export interface KpiSnapshot {
   sensorsOffline: number;
   simulationsRunning: number;
   expectedLandslides?: number; // Σ P(H | R) over the inventory — landslides expected in the current storm
+  expectedLandslides5?: number; // Σ of the 5 % bounds (conservative range)
+  expectedLandslides95?: number;
   pllEvent?: number; // Σ expected fatalities over the inventory in the current storm
+  nowcast2hMm?: number; // HKO gridded nowcast: territory mean rainfall expected in the next 2 h (real)
   trends: Record<string, Trend>;
 }
 

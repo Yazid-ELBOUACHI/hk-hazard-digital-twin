@@ -14,6 +14,15 @@ SIMULATE → COMPARE → DECIDE → ACT → VALIDATE.
 
 ## Run
 
+The Scenario Lab's **Run scenario & watch it in 3D** opens a named site with source/runout
+labels, a route guide and a narrated event timeline. **Recenter site**, **Source slope** and
+**Runout end** recover the view during a demonstration; chapter buttons jump to rainfall,
+deformation, runout or the outcome. Stable scenarios also have a 3D sequence. Playback waits
+for camera arrival and local geometry (with an eight-second tile wait limit), and reports
+missing context. On-map contact counts describe illustrative agents and loaded geometry;
+they are not casualty estimates or a physics simulation. Pause, replay and seeking share
+the same seeded scene.
+
 ```bash
 npm install
 npm run dev        # → http://localhost:5173 (includes the live HKO rainfall proxy)

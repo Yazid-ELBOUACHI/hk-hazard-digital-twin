@@ -163,15 +163,43 @@ export default function OverviewTab({ slope, assessment, onNavigate }: { slope: 
               <span className="k"><Term id="r24" /> · <Term id="return-period" /></span>
               <span className="v">{assessment.qra.r24Mm} mm · ~{assessment.qra.returnPeriodY} y</span>
               <span className="k"><Term id="p-failure" /></span>
-              <span className="v">{fmtP(assessment.qra.pFailure)} <span className="muted">(correlation {fmtP(assessment.qra.pFailureBaseline)})</span></span>
+              <span className="v">{fmtP(assessment.qra.pFailure)} <span className="muted">(5–95 %: {fmtP(assessment.qra.pFailure5)}–{fmtP(assessment.qra.pFailure95)} · correlation {fmtP(assessment.qra.pFailureBaseline)})</span></span>
               <span className="k"><Term id="magnitude" /></span>
               <span className="v">{assessment.qra.magnitude.map((m) => `${m.label} ${Math.round(m.p * 100)}%`).join(" · ")}</span>
               <span className="k"><Term id="elements" /></span>
               <span className="v">{fmtInt(assessment.qra.elements.residents)} residents · {assessment.qra.elements.buildings} blocks · {assessment.qra.elements.facilities} facilities · {assessment.qra.elements.roads} road{assessment.qra.mostExposedM !== null ? ` · nearest ${assessment.qra.mostExposedM} m` : ""}</span>
               <span className="k"><Term id="pll">Expected fatalities (PLL) · this storm</Term></span>
-              <span className="v">{assessment.qra.pllEvent.toExponential(2)}</span>
+              <span className="v">{assessment.qra.pllEvent.toExponential(2)} <span className="muted">(5–95 %: {assessment.qra.pll5.toExponential(1)}–{assessment.qra.pll95.toExponential(1)})</span></span>
               <span className="k"><Term id="ir">Individual risk · nearest resident</Term></span>
-              <span className="v">{assessment.qra.irEvent.toExponential(1)} per event · {assessment.qra.irAnnual.toExponential(1)} /y <span className="muted">(HK criteria 1e-4 existing · 1e-5 new)</span></span>
+              <span className="v">{assessment.qra.irEvent.toExponential(1)} per event · {assessment.qra.irAnnual.toExponential(1)} /y <span className="muted">(HK criteria 1e-4 existing · 1e-5 new · annual P(failure) {assessment.qra.pAnnual.toExponential(1)})</span></span>
+              <span className="k"><Term id="uncertainty" /></span>
+              <span className="v">
+                σ = {assessment.qra.sigma.toFixed(2)} <span className="muted">({Object.entries(assessment.qra.uncertaintyParts).map(([k, v]) => `${k} ${v.toFixed(2)}`).join(" · ")})</span>
+              </span>
+              {assessment.qra.voi && (
+                <>
+                  <span className="k"><Term id="voi" /></span>
+                  <span className="v">
+                    {assessment.qra.voi.decision === "act" ? "act now" : "wait"} · expected loss of waiting HK${assessment.qra.voi.expectedLossWaitHKDm.toFixed(3)} M vs precaution HK${assessment.qra.voi.actCostHKDm} M ·{" "}
+                    <Term id="evpi">EVPI</Term> HK${assessment.qra.voi.evpiHKDm.toFixed(3)} M
+                  </span>
+                  <span className="k">Best next observation · storm</span>
+                  <span className="v">
+                    {assessment.qra.voi.best
+                      ? `${assessment.qra.voi.best.label} — VOI HK$${assessment.qra.voi.best.voiHKDm.toFixed(3)} M for HK$${assessment.qra.voi.best.costHKDm} M in ${assessment.qra.voi.best.hours} h (×${assessment.qra.voi.best.ratio.toFixed(2)}${assessment.qra.voi.worthIt ? ", pays for itself" : assessment.qra.voi.enough ? ", below its cost — enough evidence for this decision" : ", below its cost"})`
+                      : "—"}
+                  </span>
+                </>
+              )}
+              {assessment.qra.voiUpgrade && (
+                <>
+                  <span className="k"><Term id="voi-upgrade">Upgrade decision · 25 y</Term></span>
+                  <span className="v">
+                    {assessment.qra.voiUpgrade.decision} · expected loss over 25 y HK${assessment.qra.voiUpgrade.expectedLossWaitHKDm.toFixed(2)} M vs upgrade HK${assessment.qra.voiUpgrade.actCostHKDm} M · EVPI HK${assessment.qra.voiUpgrade.evpiHKDm.toFixed(3)} M
+                    {assessment.qra.voiUpgrade.best && ` · investigate: ${assessment.qra.voiUpgrade.best.label} (VOI HK$${assessment.qra.voiUpgrade.best.voiHKDm.toFixed(3)} M, ×${assessment.qra.voiUpgrade.best.ratio.toFixed(2)}${assessment.qra.voiUpgrade.worthIt ? ", pays" : ""})`}
+                  </span>
+                </>
+              )}
             </div>
           )}
 

@@ -71,7 +71,8 @@ export function attachRain3d(map: maplibregl.Map): Rain3d {
       clear();
       return;
     }
-    const dt = Math.min((t - last) / 1000, 0.05); // a tab returning from the background must not teleport the drops
+    const state = useStore.getState();
+    const dt = state.sim3dActive && !state.animPlaying ? 0 : Math.min((t - last) / 1000, 0.05);
     last = t;
     readBounds();
     if (desiredCount() !== count) recount();

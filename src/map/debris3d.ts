@@ -8,15 +8,17 @@ import { SolidPolygonLayer, ScatterplotLayer, PathLayer } from "@deck.gl/layers"
 import { SimpleMeshLayer, ScenegraphLayer } from "@deck.gl/mesh-layers";
 import { GLTFLoader } from "@loaders.gl/gltf";
 import type { Layer } from "@deck.gl/core";
-import type maplibregl from "maplibre-gl";
+import maplibregl from "maplibre-gl";
+import { clipSceneRoad, simulationBounds, simulationMoment } from "@/core/simulationScene";
 import type { SimulationResult, Sim3dImpact, Slope } from "@/core/types";
 import { getDeckOverlay } from "./deckOverlay";
 import { loadRealBarriers, ND_INDICATIVE_HEIGHT_M, type Barrier } from "@/live/realBarriers";
 
 export interface Debris3d {
   /** Start playback of a result; the slope (when known) drives the camera framing. */
-  show(result: SimulationResult, slope?: Slope): void;
-  /** Rewind: fresh people, vehicles and hit state for the same result, camera left alone. */
+  show(result: SimulationResult, slope?: Slope, onReady?: () => void): void;
+  focus(view?: "scene" | "source" | "toe"): void;
+  /** Rewind the same seeded scene and clear contacts, leaving the camera alone. */
   reset(): void;
   setTime(tSec: number): void;
   hide(): void;
@@ -42,13 +44,13 @@ const HIT: [number, number, number] = [235, 55, 45];
 type XY = [number, number];
 type Kind = "car" | "bus" | "person";
 interface Poly { pts: XY[]; cum: number[]; len: number; samples: XY[] }
-interface Agent { kind: Kind; poly: Poly; s: number; dir: 1 | -1; speed: number; lateral: number; color: number[]; hit: boolean; pos: [number, number, number]; yaw: number }
+interface Agent { kind: Kind; poly: Poly; s: number; dir: 1 | -1; speed: number; lateral: number; color: number[]; hit: boolean; pos: [number, number, number]; yaw: number; startS?: number; startDir?: number }
 interface Building { ring: [number, number][]; ringM: XY[]; height: number; base: number; hit: boolean }
 /** A REAL CEDD defence measure (ND) near the toe, drawn as a wall of indicative height — the register has no height. */
 interface Wall { b: Barrier; ringM: XY[]; base: number; hit: boolean }
 const WALL_COLOR: [number, number, number, number] = [96, 124, 156, 235];
 const WALL_HIT: [number, number, number, number] = [236, 150, 48, 245];
-interface Mesh { positions: Float32Array; normals: Float32Array; texCoords: Float32Array }
+interface Mesh { attributes: { POSITION: { value: Float32Array; size: number }; NORMAL: { value: Float32Array; size: number }; TEXCOORD_0: { value: Float32Array; size: number } } }
 
 /** Low-poly shapes assembled from boxes, in metres, sitting on z = 0 and facing +x. */
 function buildMesh(build: (box: (cx: number, cy: number, z0: number, sx: number, sy: number, sz: number) => void) => void): Mesh {
@@ -65,7 +67,7 @@ function buildMesh(build: (box: (cx: number, cy: number, z0: number, sx: number,
     quad([x1, y1, z0], [x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [0, 1, 0]);
     quad([x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1], [0, -1, 0]);
   });
-  return { positions: new Float32Array(P), normals: new Float32Array(N), texCoords: new Float32Array(T) };
+  return { attributes: { POSITION: { value: new Float32Array(P), size: 3 }, NORMAL: { value: new Float32Array(N), size: 3 }, TEXCOORD_0: { value: new Float32Array(T), size: 2 } } };
 }
 const ROCK_MESH = buildMesh((box) => box(0, 0, -0.5, 1, 0.8, 1)); // unit block, centred, scaled per boulder
 
@@ -117,8 +119,6 @@ function along(p: Poly, s: number): { x: number; y: number; dx: number; dy: numb
   return { x: a[0] + (b[0] - a[0]) * t, y: a[1] + (b[1] - a[1]) * t, dx: (b[0] - a[0]) / segLen, dy: (b[1] - a[1]) / segLen };
 }
 
-const rnd = (a: number, b: number) => a + Math.random() * (b - a);
-const pick = <T,>(arr: T[]) => arr[Math.floor(Math.random() * arr.length)];
 const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 
 export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | null) => void, elevationAt?: ElevationAt): Debris3d {
@@ -128,9 +128,16 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
   // onto maplibre's own pixel for the point to within 1 px). Sampling adds the centre back, so caches stay valid
   // wherever the camera goes.
   const centerElev = () => ((map as any).transform?.elevation ?? 0) as number;
+  const elevationCache = new Map<string, number>();
   const elev: ElevationAt = elevationAt ?? ((lon, lat) => {
-    const q = map.queryTerrainElevation({ lng: lon, lat });
-    return q === null ? 0 : q + centerElev();
+    const x = Math.round(lon * 50000), y = Math.round(lat * 50000);
+    const key = `${x},${y}`;
+    const cached = elevationCache.get(key);
+    if (cached !== undefined) return cached;
+    const q = map.queryTerrainElevation({ lng: x / 50000, lat: y / 50000 });
+    const height = q === null ? 0 : q + centerElev();
+    elevationCache.set(key, height);
+    return height;
   });
   const zOff = 0; // draw frame = absolute; kept as a single knob should a LiDAR mesh come in another datum
 
@@ -143,27 +150,42 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
 
   let path: Poly = makePoly([[0, 0], [1, 1]]);
   let pathZ: number[] = [];
-  let front = 0, targetFront = 0, phase = "rainfall", tSim = 0;
+  let front = 0, phase = "rainfall", tSim = 0;
+  let site: Slope | undefined;
+  let prepared = false;
+  let terrainRevision = 0;
+  let terrainTimer: ReturnType<typeof setTimeout> | undefined;
+  let prepareTimer: ReturnType<typeof setTimeout> | undefined;
+  let generation = 0;
+  let markers: maplibregl.Marker[] = [];
+  let roadContext = "No local road geometry loaded";
+  let sceneSeed = 1;
+  const random = () => { sceneSeed = (Math.imul(sceneSeed, 1664525) + 1013904223) >>> 0; return sceneSeed / 4294967296; };
+  const rnd = (a: number, b: number) => a + random() * (b - a);
+  const pick = <T,>(arr: T[]) => arr[Math.floor(random() * arr.length)];
   let body: { u: number; v: number; r: number; h: number; color: number[] }[] = [];
   let surge: { o: number; v: number; r: number; h: number; color: number[] }[] = [];
   let boulders: { o: number; v: number; size: [number, number, number]; spin: number; rate: number; color: number[] }[] = [];
   let agents: Agent[] = [];
+  let agentContacts = new Map<Agent, number>();
   let roads: Poly[] = [];
   let hitRoads = new Set<Poly>();
   let buildings: Building[] = [];
   let walls: Wall[] = [];
   let barrierRegister: Barrier[] = [];
   void loadRealBarriers().then((d) => { if (d) barrierRegister = d.all.filter((b) => b.cls === "ND"); });
-  let raf = 0, last = 0;
+  let raf = 0;
   let lastImpact = "";
   let useModels = true; // falls back to the built-in low-poly shapes if a glTF fails to load
-  // earthquake: a short camera shake when the scenario's shaking hits (initiation), amplitude from the PGA
-  let shakeArmed = false, shakeUntil = 0, shakeAmp = 0;
-  let shakeBase: { lng: number; lat: number; bearing: number } | null = null;
-
-  const width = (s: number) => 7 + 28 * (s / Math.max(1, path.len));
+  // Keep small cut-slope demos proportionate; the old fixed 70 m spread and
+  // 6.6 m snout overwhelmed routes only 20 m long.
+  const sceneScale = () => Math.max(0.25, Math.min(1, path.len / 120));
+  const width = (s: number) => (7 + 28 * (s / Math.max(1, path.len))) * sceneScale();
   /** Flow thickness: a shallow body that bulks up into a surge over the last 45 m before the front (a debris-flow snout). */
-  const thickness = (s: number) => 1.4 + 5.2 * Math.pow(clamp01((s - (front - 45)) / 45), 1.6);
+  const thickness = (s: number) => {
+    const snout = Math.min(45, path.len * 0.6);
+    return (1.4 + 5.2 * Math.pow(clamp01((s - (front - snout)) / Math.max(1, snout)), 1.6)) * sceneScale();
+  };
   const pathZAt = (s: number) => {
     let i = 1;
     while (i < path.cum.length - 1 && path.cum[i] < s) i++;
@@ -197,21 +219,19 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
         const g = f.geometry;
         const lines = g.type === "LineString" ? [g.coordinates] : g.type === "MultiLineString" ? g.coordinates : [];
         for (const line of lines) {
-          const pts = line.map(([lon, lat]) => toM(lon, lat));
-          if (pts.length < 2 || !pts.some(([x, y]) => Math.hypot(x, y) < REACH_M)) continue;
-          const key = `${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}|${pts[pts.length - 1][0].toFixed(1)},${pts[pts.length - 1][1].toFixed(1)}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          const poly = makePoly(pts);
-          if (poly.len > 15) out.push(poly);
+          for (const pts of clipSceneRoad(line.map(([lon, lat]) => toM(lon, lat)), REACH_M)) {
+            const key = `${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}|${pts[pts.length - 1][0].toFixed(1)},${pts[pts.length - 1][1].toFixed(1)}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const poly = makePoly(pts);
+            if (poly.len > 15) out.push(poly);
+          }
         }
       }
-      if (out.length) break;
+      if (out.length) { roadContext = "Local road geometry loaded · people and traffic are illustrative"; break; }
     }
     if (!out.length) {
-      // no centrelines loaded here: a synthetic road across the toe so the scene still reads
-      const d = along(path, path.len);
-      out.push(makePoly([[d.x - d.dy * 220 + d.dx * 40, d.y + d.dx * 220 + d.dy * 40], [d.x + d.dy * 220 + d.dx * 40, d.y - d.dx * 220 + d.dy * 40]]));
+      roadContext = "No local road geometry loaded · people and traffic omitted";
     }
     return out;
   };
@@ -220,12 +240,16 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
     let feats: GeoJSON.Feature[] = [];
     try { feats = map.getSource("openmaptiles") ? (map.querySourceFeatures("openmaptiles", { sourceLayer: "building" }) as GeoJSON.Feature[]) : []; } catch { feats = []; }
     const out: Building[] = [];
+    const seen = new Set<string>();
     for (const f of feats) {
       const g = f.geometry;
       const rings = g.type === "Polygon" ? [g.coordinates[0]] : g.type === "MultiPolygon" ? g.coordinates.map((p) => p[0]) : [];
       for (const ring of rings) {
         const ringM = ring.map(([lon, lat]) => toM(lon, lat));
         if (!ringM.some(([x, y]) => Math.hypot(x, y) < REACH_M)) continue;
+        const key = JSON.stringify(ring);
+        if (seen.has(key)) continue;
+        seen.add(key);
         const cx = ringM.reduce((s, p) => s + p[0], 0) / ringM.length, cy = ringM.reduce((s, p) => s + p[1], 0) / ringM.length;
         const h = Number((f.properties as any)?.render_height) || 12;
         out.push({ ring: ring as [number, number][], ringM, height: h, base: zAt(cx, cy), hit: false });
@@ -248,27 +272,37 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
 
   const spawnAgents = () => {
     agents = [];
+    if (!roads.length) return;
     const total = roads.reduce((s, r) => s + r.len, 0) || 1;
-    const pickRoad = () => { let r = Math.random() * total; for (const p of roads) { r -= p.len; if (r <= 0) return p; } return roads[roads.length - 1]; };
+    const pickRoad = () => { let r = random() * total; for (const p of roads) { r -= p.len; if (r <= 0) return p; } return roads[roads.length - 1]; };
     for (let i = 0; i < VEHICLES; i++) {
       const bus = i % 5 === 0;
-      const dir: 1 | -1 = Math.random() < 0.5 ? 1 : -1;
+      const dir: 1 | -1 = random() < 0.5 ? 1 : -1;
       agents.push({ kind: bus ? "bus" : "car", poly: pickRoad(), s: 0, dir, speed: bus ? rnd(5, 8) : rnd(6, 11), lateral: 2.2 * dir, color: bus ? [235, 235, 240] : pick(CAR_COLORS), hit: false, pos: [0, 0, 0], yaw: 0 });
     }
     for (let i = 0; i < PEOPLE; i++) {
-      const dir: 1 | -1 = Math.random() < 0.5 ? 1 : -1;
-      agents.push({ kind: "person", poly: pickRoad(), s: 0, dir, speed: rnd(0.9, 1.6), lateral: (Math.random() < 0.5 ? 5.5 : -5.5) + rnd(-0.8, 0.8), color: pick(PERSON_COLORS), hit: false, pos: [0, 0, 0], yaw: 0 });
+      const dir: 1 | -1 = random() < 0.5 ? 1 : -1;
+      agents.push({ kind: "person", poly: pickRoad(), s: 0, dir, speed: rnd(0.9, 1.6), lateral: (random() < 0.5 ? 5.5 : -5.5) + rnd(-0.8, 0.8), color: pick(PERSON_COLORS), hit: false, pos: [0, 0, 0], yaw: 0 });
     }
-    for (const a of agents) a.s = Math.random() * a.poly.len;
+    for (const a of agents) a.s = random() * a.poly.len;
     // warned in time: most people are already walking away from the slope, and quickly
     const evacuated = Math.max(0, Math.min(0.85, (result?.params.warningLeadTimeMin ?? 0) / 45));
     for (const a of agents) {
-      if (a.kind !== "person" || Math.random() > evacuated) continue;
+      if (a.kind !== "person" || random() > evacuated) continue;
       const here = along(a.poly, a.s), ahead = along(a.poly, Math.min(a.poly.len, a.s + 5));
       const awayFromToe = (ahead.x - here.x) * here.x + (ahead.y - here.y) * here.y > 0; // does +s lead away from the origin (toe)?
       a.dir = awayFromToe ? 1 : -1;
       a.speed = rnd(1.8, 2.6);
     }
+    for (const a of agents) { a.startS = a.s; a.startDir = a.dir; }
+  };
+
+  const positionAgent = (a: Agent, t: number) => {
+    const travel = a.startS! + a.startDir! * a.speed * t / 2;
+    const period = 2 * a.poly.len;
+    const folded = ((travel % period) + period) % period;
+    a.s = folded <= a.poly.len ? folded : period - folded;
+    a.dir = (folded <= a.poly.len ? a.startDir! : -a.startDir!) as 1 | -1;
   };
 
   const placeAgent = (a: Agent) => {
@@ -285,10 +319,10 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
     const left: [number, number, number][] = [], right: [number, number, number][] = [];
     const step = Math.max(4, front / 60);
     for (let s = 0; s <= front; s += step) {
-      const p = along(path, s), w = width(s) * scale, z = pathZAt(s) + lift - zOff;
+      const p = along(path, s), w = width(s) * scale;
       const L = toLL(p.x - p.dy * w, p.y + p.dx * w), R = toLL(p.x + p.dy * w, p.y - p.dx * w);
-      left.push([L[0], L[1], z]);
-      right.push([R[0], R[1], z]);
+      left.push([L[0], L[1], elev(L[0], L[1]) + lift]);
+      right.push([R[0], R[1], elev(R[0], R[1]) + lift]);
     }
     const tip = along(path, front), tipLL = toLL(tip.x + tip.dx * width(front) * scale * 0.7, tip.y + tip.dy * width(front) * scale * 0.7);
     return [...left, [tipLL[0], tipLL[1], pathZAt(front) + lift - zOff], ...right.reverse(), left[0]];
@@ -298,15 +332,15 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
   const massSegments = () => {
     const segs: { polygon: [number, number, number][]; h: number; color: [number, number, number, number] }[] = [];
     const step = Math.max(5, front / 40);
-    let prev: { L: XY; R: XY; z: number } | null = null;
+    let prev: { L: XY; R: XY } | null = null;
     for (let s = 0; s <= front + step * 0.5; s += step) {
       const sc = Math.min(s, front);
-      const p = along(path, sc), w = width(sc), z = pathZAt(sc) + 0.3 - zOff;
-      const cur = { L: toLL(p.x - p.dy * w, p.y + p.dx * w), R: toLL(p.x + p.dy * w, p.y - p.dx * w), z };
+      const p = along(path, sc), w = width(sc);
+      const cur = { L: toLL(p.x - p.dy * w, p.y + p.dx * w), R: toLL(p.x + p.dy * w, p.y - p.dx * w) };
       if (prev) {
         const h = thickness(sc);
         const wet = clamp01((front - sc) / 60); // older, further-back material is darker and wetter
-        segs.push({ polygon: [[...prev.L, prev.z], [...cur.L, cur.z], [...cur.R, cur.z], [...prev.R, prev.z], [...prev.L, prev.z]], h, color: [96 - 20 * wet, 66 - 14 * wet, 40 - 8 * wet, 240] });
+        segs.push({ polygon: [prev.L, cur.L, cur.R, prev.R, prev.L].map(([lon, lat]) => [lon, lat, elev(lon, lat) + 0.3] as [number, number, number]), h, color: [96 - 20 * wet, 66 - 14 * wet, 40 - 8 * wet, 240] });
       }
       prev = cur;
       if (sc >= front) break;
@@ -316,6 +350,12 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
 
   const buildLayers = (): Layer[] => {
     const layers: Layer[] = [];
+    if (result?.failureLikely) layers.push(new PathLayer({
+      id: "sim-route-guide", data: [path.pts.map(([x, y]) => toLL(x, y))],
+      getPath: (pts: XY[]) => pts.map(([lon, lat]) => [lon, lat, elev(lon, lat) + 3] as [number, number, number]),
+      getColor: [255, 213, 110, 210], getWidth: 3, widthUnits: "pixels", pickable: false,
+      parameters: { depthCompare: "always" },
+    }));
     if (front > 2) {
       // wet spread beyond the mass, then the mass itself (thick snout, thin tail), then the churn on top
       layers.push(new SolidPolygonLayer({ id: "debris-spread", data: [{ polygon: ringAt(1.45, 0.4) }], getPolygon: (d: any) => d.polygon, getFillColor: [120, 90, 55, 95], pickable: false }));
@@ -327,12 +367,12 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
           const s = ((d.u + tSim * 0.05) % 1) * front;
           const p = along(path, s), w = width(s) * 0.9;
           const ll = toLL(p.x - p.dy * d.v * w, p.y + p.dx * d.v * w);
-          return [ll[0], ll[1], pathZAt(s) + 0.4 + d.h * thickness(s) + 0.3 * Math.sin(tSim * 7 + d.u * 50) - zOff];
+          return [ll[0], ll[1], elev(ll[0], ll[1]) + 0.4 + d.h * thickness(s) + 0.3 * Math.sin(tSim * 7 + d.u * 50) - zOff];
         },
         getRadius: (d: any) => d.r,
         radiusUnits: "meters",
         getFillColor: (d: any) => d.color,
-        updateTriggers: { getPosition: [front, tSim] },
+        updateTriggers: { getPosition: [front, tSim, terrainRevision] },
         pickable: false,
       }));
       layers.push(new ScatterplotLayer({
@@ -342,12 +382,12 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
           const s = Math.max(0, front - d.o * (1 + 0.15 * Math.sin(tSim * 9 + d.v * 20)));
           const p = along(path, s), w = width(s) * 1.05;
           const ll = toLL(p.x - p.dy * d.v * w, p.y + p.dx * d.v * w);
-          return [ll[0], ll[1], pathZAt(s) + 0.4 + d.h * (thickness(s) + 1.5) + 0.6 * Math.abs(Math.sin(tSim * 11 + d.o)) - zOff];
+          return [ll[0], ll[1], elev(ll[0], ll[1]) + 0.4 + d.h * (thickness(s) + 1.5) + 0.6 * Math.abs(Math.sin(tSim * 11 + d.o)) - zOff];
         },
         getRadius: (d: any) => d.r,
         radiusUnits: "meters",
         getFillColor: (d: any) => d.color,
-        updateTriggers: { getPosition: [front, tSim] },
+        updateTriggers: { getPosition: [front, tSim, terrainRevision] },
         pickable: false,
       }));
       layers.push(new SimpleMeshLayer({
@@ -358,12 +398,12 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
           const s = Math.max(0, front - d.o);
           const p = along(path, s), w = width(s) * 0.9;
           const ll = toLL(p.x - p.dy * d.v * w, p.y + p.dx * d.v * w);
-          return [ll[0], ll[1], pathZAt(s) + 0.5 + thickness(s) * 0.9 + d.size[2] * 0.5 - zOff];
+          return [ll[0], ll[1], elev(ll[0], ll[1]) + 0.5 + thickness(s) * 0.9 + d.size[2] * 0.5 - zOff];
         },
         getOrientation: (d: any) => [d.spin + tSim * d.rate, d.v * 90, d.spin * 0.7 + tSim * d.rate * 0.6],
         getScale: (d: any) => d.size,
         getColor: (d: any) => d.color,
-        updateTriggers: { getPosition: [front, tSim], getOrientation: tSim },
+        updateTriggers: { getPosition: [front, tSim, terrainRevision], getOrientation: tSim },
         pickable: false,
       }));
     }
@@ -380,7 +420,14 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
       layers.push(new SolidPolygonLayer({ id: "debris-hit-buildings", data: hitB, getPolygon: (b: Building) => b.ring.map(([lon, lat]) => [lon, lat, b.base - zOff] as [number, number, number]), extruded: true, getElevation: (b: Building) => b.height + 1, getFillColor: [225, 60, 50, 150], updateTriggers: { getPolygon: zOff }, pickable: false }));
     }
     if (hitRoads.size) {
-      layers.push(new PathLayer({ id: "debris-hit-roads", data: [...hitRoads], getPath: (p: Poly) => p.pts.map(([x, y]) => { const ll = toLL(x, y); return [ll[0], ll[1], zAt(x, y) + 0.5 - zOff] as [number, number, number]; }), getColor: [225, 60, 50, 220], getWidth: 6, widthUnits: "meters", updateTriggers: { getPath: zOff }, pickable: false }));
+      const contacts: XY[][] = [];
+      for (const road of hitRoads) {
+        for (let i = 1; i < road.samples.length; i++) {
+          const a = road.samples[i - 1], b = road.samples[i];
+          if (inFlow(a[0], a[1]) || inFlow(b[0], b[1])) contacts.push([a, b]);
+        }
+      }
+      layers.push(new PathLayer({ id: "debris-hit-roads", data: contacts, getPath: (pts: XY[]) => pts.map(([x, y]) => { const ll = toLL(x, y); return [ll[0], ll[1], zAt(x, y) + 0.5 - zOff] as [number, number, number]; }), getColor: [225, 60, 50, 220], getWidth: 6, widthUnits: "meters", pickable: false }));
     }
     for (const kind of ["car", "bus", "person"] as Kind[]) {
       const data = agents.filter((a) => a.kind === kind);
@@ -395,14 +442,14 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
           loaders: [GLTFLoader],
           sizeScale: mdl.scale,
           _lighting: "pbr",
-          _animations: mdl.animate ? { "*": { speed: 1 } } : undefined,
+          _animations: mdl.animate ? { "*": { playing: false } } : undefined,
           getPosition: (a: Agent) => [a.pos[0], a.pos[1], a.pos[2] - zOff],
           getOrientation: (a: Agent) => {
             const [bp, by, br] = mdl.base;
             return a.hit ? (kind === "person" ? [bp + 85, by + a.yaw, br] : [bp + 18, by + a.yaw, br + 8]) : [bp, by + a.yaw, br];
           },
           getColor: (a: Agent) => (a.hit ? HIT : kind === "car" ? a.color : [255, 255, 255]) as [number, number, number],
-          updateTriggers: { getPosition: tSim, getOrientation: tSim, getColor: tSim },
+          updateTriggers: { getPosition: [tSim, terrainRevision], getOrientation: tSim, getColor: tSim },
           onError: (err: Error) => { console.warn(`3D model for ${kind} failed, using built-in shapes:`, err.message); useModels = false; },
           pickable: false,
         } as any));
@@ -415,7 +462,7 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
         getPosition: (a: Agent) => [a.pos[0], a.pos[1], a.pos[2] - zOff],
         getOrientation: (a: Agent) => (a.hit ? (a.kind === "person" ? [0, a.yaw, 85] : [18, a.yaw, 8]) : [0, a.yaw, 0]),
         getColor: (a: Agent) => (a.hit ? HIT : a.color) as [number, number, number],
-        updateTriggers: { getPosition: tSim, getOrientation: tSim, getColor: tSim },
+        updateTriggers: { getPosition: [tSim, terrainRevision], getOrientation: tSim, getColor: tSim },
         pickable: false,
       }));
     }
@@ -423,122 +470,208 @@ export function attachDebris3d(map: maplibregl.Map, onImpact: (i: Sim3dImpact | 
   };
 
   const report = () => {
-    const imp: Sim3dImpact = { buildings: buildings.filter((b) => b.hit).length, roads: hitRoads.size, people: agents.filter((a) => a.kind === "person" && a.hit).length, vehicles: agents.filter((a) => a.kind !== "person" && a.hit).length, barriers: walls.filter((w) => w.hit).length, barriersInScene: walls.length, frontM: Math.round(front), phase };
+    const imp: Sim3dImpact = { buildings: buildings.filter((b) => b.hit).length, roads: hitRoads.size, people: agents.filter((a) => a.kind === "person" && a.hit).length, vehicles: agents.filter((a) => a.kind !== "person" && a.hit).length, barriers: walls.filter((w) => w.hit).length, barriersInScene: walls.length, frontM: Math.round(front), phase, roadContext, buildingsInScene: buildings.length, terrainReady: result!.runoutPath.every(([lng, lat]) => map.queryTerrainElevation({ lng, lat }) !== null) };
     const key = JSON.stringify(imp);
     if (key === lastImpact) return;
     lastImpact = key;
     onImpact(imp);
   };
 
-  const frame = (now: number) => {
+  const frame = () => {
     raf = 0;
-    if (!result) return;
-    const dt = Math.min(0.05, (now - last) / 1000);
-    last = now;
-    tSim += dt;
-    front += (targetFront - front) * Math.min(1, dt * 3);
-    for (const a of agents) {
-      if (!a.hit) {
-        a.s += a.dir * a.speed * dt;
-        if (a.s < 0 || a.s > a.poly.len) { a.dir = a.dir === 1 ? -1 : 1; a.s = Math.max(0, Math.min(a.poly.len, a.s)); }
-      }
-      const [x, y] = placeAgent(a);
-      if (!a.hit && inFlow(x, y)) a.hit = true;
-    }
-    if (front > 2) {
-      for (const b of buildings) if (!b.hit && b.ringM.some(([x, y]) => inFlow(x, y))) b.hit = true;
-      for (const w of walls) if (!w.hit && w.ringM.some(([x, y]) => inFlow(x, y))) w.hit = true;
-      for (const r of roads) if (!hitRoads.has(r) && r.samples.some(([x, y]) => inFlow(x, y))) hitRoads.add(r);
-    }
-    if (shakeUntil > now) {
-      if (!shakeBase) { const c = map.getCenter(); shakeBase = { lng: c.lng, lat: c.lat, bearing: map.getBearing() }; }
-      const k = (shakeUntil - now) / 1400; // fades out
-      const m = shakeAmp * k;
-      map.jumpTo({ center: [shakeBase.lng + (rnd(-m, m) / mPerLon), shakeBase.lat + rnd(-m, m) / M_PER_DEG_LAT], bearing: shakeBase.bearing + rnd(-0.6, 0.6) * k });
-    } else if (shakeBase) {
-      map.jumpTo({ center: [shakeBase.lng, shakeBase.lat], bearing: shakeBase.bearing });
-      shakeBase = null;
-    }
+    if (!result || !prepared) return;
     deck.setLayers("debris3d", buildLayers());
     report();
-    raf = requestAnimationFrame(frame);
+  };
+
+  const setTime = (time: number) => {
+    if (!result || !prepared) return;
+    const moment = simulationMoment(result, time);
+    tSim = moment.tSec;
+    phase = moment.phase;
+    front = Math.min(path.len, moment.debrisFrontM);
+    for (const a of agents) {
+      const contact = agentContacts.get(a) ?? Infinity;
+      a.hit = contact <= tSim;
+      positionAgent(a, Math.min(tSim, contact));
+    }
+    for (const a of agents) placeAgent(a);
+    for (const b of buildings) b.hit = b.ringM.some(([x, y]) => inFlow(x, y));
+    for (const w of walls) w.hit = w.ringM.some(([x, y]) => inFlow(x, y));
+    hitRoads = new Set(roads.filter(r => r.samples.some(([x, y]) => inFlow(x, y))));
+    const p = along(path, front);
+    if (markers[2]) {
+      markers[2].setLngLat(toLL(p.x, p.y));
+      markers[2].getElement().hidden = front < 1;
+      markers[2].getElement().textContent = `Front | ${Math.round(front)} m`;
+    }
+    if (!raf) raf = requestAnimationFrame(frame);
   };
 
   const initScene = (r: SimulationResult) => {
     result = r;
+    elevationCache.clear();
     const pts = r.runoutPath.length >= 2 ? r.runoutPath : [r.runoutPath[0] ?? [114.15, 22.28], r.runoutPath[0] ?? [114.15, 22.28]];
     const toe = pts[pts.length - 1];
     origin = [toe[0], toe[1]];
     mPerLon = M_PER_DEG_LAT * Math.cos((toe[1] * Math.PI) / 180);
     path = makePoly(pts.map(([lon, lat]) => toM(lon, lat)));
-    pathZ = pts.map(([lon, lat]) => elev(lon, lat));
-    front = 0; targetFront = 0; tSim = 0; phase = "rainfall"; lastImpact = "";
-    shakeArmed = (r.params.seismicPga ?? 0) >= 0.05; shakeUntil = 0; shakeBase = null;
-    shakeAmp = 1.2 + 6 * Math.min(1, (r.params.seismicPga ?? 0) / 0.4); // metres of camera jitter
-    body = Array.from({ length: PARTICLES }, () => ({ u: Math.random(), v: rnd(-1, 1), r: rnd(0.5, 2.4), h: Math.random(), color: pick(BODY_COLORS) }));
-    surge = Array.from({ length: SURGE }, () => ({ o: Math.pow(Math.random(), 1.5) * 30, v: rnd(-1, 1), r: rnd(1.4, 4.2), h: Math.random(), color: pick(SURGE_COLORS) }));
-    boulders = Array.from({ length: BOULDERS }, () => ({ o: rnd(0, 28), v: rnd(-0.9, 0.9), size: [rnd(1, 3.2), rnd(0.8, 2.6), rnd(0.8, 2.4)] as [number, number, number], spin: rnd(0, 360), rate: rnd(-140, 140), color: pick(ROCK_COLORS) }));
+    const dense: XY[] = [];
+    for (let s = 0; s < path.len; s += 8) { const p = along(path, s); dense.push([p.x, p.y]); }
+    dense.push(path.pts[path.pts.length - 1]);
+    if (dense.length >= 2) path = makePoly(dense);
+    pathZ = path.pts.map(([x, y]) => zAt(x, y));
+    front = 0; tSim = 0; phase = "rainfall"; lastImpact = "";
+    sceneSeed = [...r.slopeId].reduce((h, c) => Math.imul(h, 31) + c.charCodeAt(0), 7) >>> 0;
+    const scale = sceneScale();
+    body = Array.from({ length: PARTICLES }, () => ({ u: random(), v: rnd(-1, 1), r: rnd(0.5, 2.4) * scale, h: random(), color: pick(BODY_COLORS) }));
+    surge = Array.from({ length: SURGE }, () => ({ o: Math.pow(random(), 1.5) * Math.min(30, path.len * 0.45), v: rnd(-1, 1), r: rnd(1.4, 4.2) * scale, h: random(), color: pick(SURGE_COLORS) }));
+    boulders = Array.from({ length: BOULDERS }, () => ({ o: rnd(0, Math.min(28, path.len * 0.45)), v: rnd(-0.9, 0.9), size: [rnd(1, 3.2) * scale, rnd(0.8, 2.6) * scale, rnd(0.8, 2.4) * scale] as [number, number, number], spin: rnd(0, 360), rate: rnd(-140, 140), color: pick(ROCK_COLORS) }));
     roads = roadsNearToe();
     hitRoads = new Set();
     buildings = buildingsNearToe();
     walls = wallsNearToe();
     spawnAgents();
-    if (!raf) { last = performance.now(); raf = requestAnimationFrame(frame); }
+    agentContacts = new Map();
+    // Cache deterministic first contacts once. Playback and seeking only interpolate positions.
+    for (let t = 0; t <= 60; t += 0.5) {
+      front = Math.min(path.len, simulationMoment(r, t).debrisFrontM);
+      for (const a of agents) {
+        if (agentContacts.has(a)) continue;
+        positionAgent(a, t);
+        const p = along(a.poly, a.s);
+        if (inFlow(p.x - p.dy * a.lateral, p.y + p.dx * a.lateral)) agentContacts.set(a, t);
+      }
+    }
+    prepared = true;
+    setTime(0);
+  };
+
+  const clearPreparation = () => {
+    generation++;
+    clearTimeout(prepareTimer);
+    clearTimeout(terrainTimer);
+    for (const marker of markers) marker.remove();
+    markers = [];
+  };
+
+  // Zooming loads a different DEM level. Refresh cached heights after arrival or new DEM
+  // tiles, including while paused, so a close-up cannot leave debris above/below the ground.
+  const refreshTerrain = () => {
+    if (!prepared || !result) return;
+    clearTimeout(terrainTimer);
+    terrainTimer = setTimeout(() => {
+      if (!prepared || !result) return;
+      if (map.isMoving()) { refreshTerrain(); return; }
+      elevationCache.clear();
+      terrainRevision++;
+      pathZ = path.pts.map(([x, y]) => zAt(x, y));
+      for (const b of buildings) {
+        const x = b.ringM.reduce((sum, p) => sum + p[0], 0) / b.ringM.length;
+        const y = b.ringM.reduce((sum, p) => sum + p[1], 0) / b.ringM.length;
+        b.base = zAt(x, y);
+      }
+      for (const w of walls) w.base = elev(w.b.lon, w.b.lat);
+      setTime(tSim);
+    }, 200);
+  };
+  const onTerrainData = (event: maplibregl.MapSourceDataEvent) => {
+    if (event.sourceId === "dem" && event.sourceDataType === "content") refreshTerrain();
+  };
+  map.on("moveend", refreshTerrain);
+  map.on("sourcedata", onTerrainData);
+
+  // MapLibre 4's animated camera can apply a cloned transform with stale
+  // elevation. Resolve the target against the DEM so a close-up does not aim
+  // at sea level and push the slope above the viewport.
+  const previousCameraUpdate = map.transformCameraUpdate;
+  const sceneCameraUpdate: NonNullable<typeof map.transformCameraUpdate> = transform => {
+    const update = previousCameraUpdate?.(transform) ?? {};
+    if (!result || !map.getTerrain()) return update;
+    const center = update.center ?? transform.center;
+    const sampled = map.queryTerrainElevation(center);
+    return sampled === null ? update : { ...update, elevation: sampled + centerElev() };
+  };
+  map.transformCameraUpdate = sceneCameraUpdate;
+
+  const focus = (view: "scene" | "source" | "toe" = "scene") => {
+    if (!result) return;
+    const box = map.getContainer();
+    const hud = box.parentElement?.querySelector(".sim3d-hud");
+    const bottom = Math.min(box.clientHeight * 0.48, (hud?.getBoundingClientRect().height ?? 200) + 36);
+    const padding = { top: Math.min(100, box.clientHeight * 0.18), bottom, left: Math.min(80, box.clientWidth * 0.12), right: Math.min(80, box.clientWidth * 0.12) };
+    const bearing = ((site?.aspectDeg ?? 0) + 150) % 360;
+    if (view === "scene") {
+      // No minimum zoom: a 900 m runout needs a wider view than a short cut slope.
+      // fitBounds adds its padding to existing camera padding in MapLibre 4.
+      // Clear the close-up/sidebar padding so repeated recentering still fits.
+      map.setPadding({ top: 0, bottom: 0, left: 0, right: 0 });
+      map.fitBounds(simulationBounds(result, site), { padding, bearing, pitch: 30, maxZoom: 17.4, duration: 1200 });
+    } else {
+      const point = view === "source" ? result.runoutPath[0] : result.runoutPath[result.runoutPath.length - 1];
+      map.easeTo({ center: point, zoom: path.len < 120 ? 18 : 17.3, pitch: 50, bearing, padding, duration: 900 });
+    }
   };
 
   return {
-    reset() {
-      if (result) initScene(result);
-    },
-    show(r, slope) {
-      initScene(r);
-      // cinematic framing from the geometry: look *uphill* along the slope's own aspect (falling back to the
-      // toe→crown direction of the runout), and fit the slope polygon plus the whole runout in view
-      const crown = path.pts[0];
-      const d = Math.hypot(crown[0], crown[1]) || 1;
-      const ux = crown[0] / d, uy = crown[1] / d;
-      const bearing = slope && slope.aspectDeg > 0 ? (slope.aspectDeg + 180) % 360 : (Math.atan2(ux, uy) * 180) / Math.PI;
-      const pts: [number, number][] = [...r.runoutPath, ...(slope?.polygon ?? [])];
-      let west = Infinity, south = Infinity, east = -Infinity, north = -Infinity;
-      for (const [lon, lat] of pts) { west = Math.min(west, lon); east = Math.max(east, lon); south = Math.min(south, lat); north = Math.max(north, lat); }
-      const fit = map.cameraForBounds([[west, south], [east, north]], { bearing, padding: { top: 60, bottom: 120, left: 80, right: 80 }, maxZoom: 17.4 });
-      // cameraForBounds frames a flat view: under pitch the uphill end compresses toward the top of the screen,
-      // so bias the centre toward the crown and hold a little back
-      const crownLL = r.runoutPath[0], toeLL = r.runoutPath[r.runoutPath.length - 1];
-      const center: [number, number] = fit ? [(fit.center as any).lng ?? (fit.center as any)[0], (fit.center as any).lat ?? (fit.center as any)[1]] : toLL(-ux * 30, -uy * 30);
-      center[0] += (crownLL[0] - toeLL[0]) * 0.25;
-      center[1] += (crownLL[1] - toeLL[1]) * 0.25;
-      const target = fit ? { center, zoom: Math.max(15.8, (fit.zoom ?? 17) - 0.2), pitch: 60, bearing } : { center, zoom: 17.2, pitch: 60, bearing };
-      const go = () => {
-        if (result !== r) return;
-        map.easeTo({ ...target, duration: 2200, essential: true });
+    focus,
+    reset() { setTime(0); },
+    show(r, slope, onReady) {
+      clearPreparation();
+      const token = generation;
+      result = r;
+      prepared = false;
+      site = slope;
+      const addMarker = (point: XY, text: string, kind: string) => {
+        const el = document.createElement("div");
+        el.className = `sim-site-marker ${kind}`;
+        el.textContent = text;
+        const marker = new maplibregl.Marker({ element: el, opacityWhenCovered: "1", anchor: kind === "source" ? "bottom-right" : kind === "toe" ? "bottom-left" : "top-right", offset: kind === "source" ? [-12, -42] : kind === "toe" ? [12, -12] : [-35, 12] }).setLngLat(point).addTo(map);
+        markers.push(marker);
       };
-      // the command centre folds away and the basemap may switch when playback starts; both cancel an in-flight ease
-      setTimeout(() => (map.isStyleLoaded() ? go() : map.once("idle", go)), 500);
-    },
-    setTime(tSec) {
-      if (!result) return;
-      const f = result.frames.reduce((best, fr) => (fr.tSec <= tSec ? fr : best), result.frames[0]);
-      targetFront = Math.min(path.len, f.debrisFrontM);
-      if (shakeArmed && f.phase !== "rainfall" && f.phase !== "saturation" && f.phase !== "deformation" && phase !== f.phase) {
-        shakeArmed = false;
-        shakeUntil = performance.now() + 1400;
+      addMarker(r.runoutPath[0], r.failureLikely ? "1 | Source slope" : "Tested slope | no failure", "source");
+      if (r.failureLikely) {
+        addMarker(r.runoutPath[r.runoutPath.length - 1], "2 | Modelled runout end", "toe");
+        addMarker(r.runoutPath[0], "Front | 0 m", "front");
+        markers[2].getElement().hidden = true;
       }
-      phase = f.phase;
-      if (!raf) { last = performance.now(); raf = requestAnimationFrame(frame); }
+      const started = performance.now();
+      // Let the panel resize finish, then frame the site before sampling local geometry/DEM.
+      prepareTimer = setTimeout(() => {
+        if (generation !== token) return;
+        focus();
+        const prepare = () => {
+          if (generation !== token) return;
+          if (map.isMoving() || (!map.areTilesLoaded() && performance.now() - started < 8000)) {
+            prepareTimer = setTimeout(prepare, 150);
+            return;
+          }
+          initScene(r);
+          onReady?.();
+        };
+        prepareTimer = setTimeout(prepare, 1300);
+      }, 350);
     },
+    setTime,
     hide() {
+      clearPreparation();
       if (raf) cancelAnimationFrame(raf);
       raf = 0;
       result = null;
+      prepared = false;
       deck.setLayers("debris3d", []);
       lastImpact = "";
       onImpact(null);
     },
     dispose() {
+      clearPreparation();
+      if (map.transformCameraUpdate === sceneCameraUpdate) map.transformCameraUpdate = previousCameraUpdate;
+      map.off("moveend", refreshTerrain);
+      map.off("sourcedata", onTerrainData);
       if (raf) cancelAnimationFrame(raf);
       raf = 0;
       result = null;
+      prepared = false;
       deck.remove("debris3d");
     },
   };

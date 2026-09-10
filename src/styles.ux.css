@@ -346,6 +346,52 @@ body.sim3d-mode .storm-banner,
 body.sim3d-mode .layer-panel { display: none !important; }
 /* with the side panels gone, the camera bar sits at the true right edge */
 body.sim3d-mode .cam-controls { right: 16px !important; }
+.sim3d-location { position: absolute; top: 16px; left: 16px; z-index: 6; display: grid; gap: 4px; max-width: calc(100% - 32px); padding: 12px 16px; border-radius: 16px; background: rgba(12,16,24,.82); color: #f2f5fa; backdrop-filter: blur(14px); pointer-events: none; }
+.sim3d-eyebrow { font-size: 9px; letter-spacing: .12em; color: #ffd76b; }
+.sim3d-location strong { font-size: 16px; }
+.sim3d-location span:not(.sim3d-eyebrow), .sim3d-location small { font-size: 11px; color: #c9d0da; }
+.sim-site-marker { padding: 6px 10px; border: 1px solid #ffdb80; background: rgba(26,26,30,.92); color: #ffe1a0; font: 600 11px system-ui; border-radius: 8px; box-shadow: 0 3px 12px #0006; pointer-events: none; white-space: nowrap; }
+.sim-site-marker::after { content: ""; position: absolute; left: 50%; top: 100%; height: 18px; border-left: 2px solid currentColor; }
+.sim-site-marker.toe { color: #dbeafe; border-color: #a7cafa; }
+.sim-site-marker.front { color: white; border-color: #fb8c70; background: #8a321e; margin-top: 28px; }
+.sim-site-marker[hidden] { display: none; }
+body.sim3d-mode .selected-slope-marker { display: none; }
+.sim-site-marker.source::after { left: auto; right: 0; }
+.sim-site-marker.toe::after { left: 0; }
+.sim-site-marker.front::after { display: none; }
+.sim3d-hud { width: min(760px, calc(100% - 32px)); bottom: 16px; }
+.sim3d-phase { display: flex; gap: 12px; align-items: baseline; margin: 10px 0; padding: 9px 11px; background: #ffffff0b; border-radius: 9px; }
+.sim3d-phase b { text-transform: capitalize; color: #ffd76b; white-space: nowrap; }
+.sim3d-phase span { color: #e0e5ed; line-height: 1.4; }
+.sim3d-views, .sim3d-chapters { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.sim3d-views button, .sim3d-chapters button { border: 1px solid #ffffff24; border-radius: 8px; padding: 5px 9px; color: #e8ecf3; background: #ffffff0d; font: inherit; cursor: pointer; }
+.sim3d-views span { color: #d1b981; font-size: 10px; margin-left: auto; }
+.sim3d-chapters { margin-top: 7px; }
+.sim3d-chapters button { flex: 1; font-size: 10px; }
+.sim3d-controls input[type="range"] { min-width: 35px; }
+.sim3d-controls select { color: #fff; background: #303640; border-radius: 7px; padding: 4px; border: 0; font: inherit; }
+.sim3d-context { display: block; margin-top: 3px; color: #bfc8d5; }
+.sim3d-hud button:disabled { opacity: .4; cursor: wait; }
+.sim3d-hud button:focus-visible, .sim3d-hud select:focus-visible { outline: 2px solid #ffd76b; outline-offset: 2px; }
+body.sim3d-mode .cam-controls { top: 16px; bottom: auto; }
+@media (max-width: 700px) {
+  body.sim3d-mode .topbar > :not(.brand) { display: none; }
+  body.sim3d-mode .topbar .brand { min-width: 0; }
+  body.sim3d-mode .topbar .brand-title { font-size: 12px; white-space: normal; }
+  body.sim3d-mode .topbar .brand-sub { font-size: 9px; white-space: normal; }
+  body.sim3d-mode .synth-banner { gap: 6px; min-width: 0; }
+  body.sim3d-mode .synth-banner > :not(.credit):not(.pill) { display: none; }
+  body.sim3d-mode .synth-banner .credit { min-width: 0; white-space: normal; font-size: 9px; line-height: 1.4; }
+  .sim3d-location { right: 16px; max-width: none; }
+  .sim3d-location strong { font-size: 13px; }
+  body.sim3d-mode .cam-controls { display: none; }
+  .sim3d-hud { padding: 9px 10px; }
+  .sim3d-tally { gap: 6px 12px; }
+  .sim3d-tally b { font-size: 13px; }
+  .sim3d-phase { gap: 8px; font-size: 11px; }
+  .sim3d-controls { gap: 5px; }
+  .sim3d-controls button { padding: 5px 7px; }
+}
 
 /* ---- Glossary terms: hover explanation, click → "How it is calculated" ---- */
 .term { border-bottom: 1px dotted var(--text-2); cursor: help; text-decoration: none; color: inherit; background: none; border-top: 0; border-left: 0; border-right: 0; padding: 0; font: inherit; }
@@ -360,3 +406,8 @@ body.sim3d-mode .cam-controls { right: 16px !important; }
 .term-pop .go { display: block; margin-top: 6px; font-size: 10.5px; color: var(--accent); }
 .calc-flash { animation: calc-flash 2.4s ease-out; }
 @keyframes calc-flash { 0% { background: color-mix(in srgb, var(--accent) 28%, transparent); } 100% { background: transparent; } }
+
+/* ---- What's new banner link ---- */
+.banner-link.glow { color: var(--accent); }
+.banner-link .new-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-right: 6px; box-shadow: 0 0 0 0 rgba(61,139,253,0.6); animation: new-dot 1.6s ease-out infinite; vertical-align: middle; }
+@keyframes new-dot { 0% { box-shadow: 0 0 0 0 rgba(61,139,253,0.6); } 100% { box-shadow: 0 0 0 7px rgba(61,139,253,0); } }

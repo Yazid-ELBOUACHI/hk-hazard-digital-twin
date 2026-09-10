@@ -3,6 +3,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore, LayerState } from "@/state/store";
+import { simulationMoment } from "@/core/simulationScene";
 import { RISK_COLORS, RiskCategory } from "@/core/types";
 
 const LAYER_GROUPS: { title: string; items: { key: keyof LayerState; label: string; hint: string }[] }[] = [
@@ -14,6 +15,7 @@ const LAYER_GROUPS: { title: string; items: { key: keyof LayerState; label: stri
       { key: "rainfall", label: "Rainfall", hint: "Regional rainfall intensity heatmap" },
       { key: "rain3d", label: "Rain in 3D", hint: "Rain falling over the terrain whenever the top-bar intensity is above zero — HKO live when available, plus the storm scenario. The drops are synthetic; the intensity is real." },
       { key: "floodZones", label: "Flood zones", hint: "Indicative ponding areas around drainage assets" },
+      { key: "stormGrid", label: "Expected landslides grid", hint: "PoLA storm report on GEO's 750 × 600 m grid — Σ P(H|R) of the inventory slopes in each cell for the current storm; darker = more landslides expected. Hover a cell for its numbers." },
     ],
   },
   {
@@ -78,6 +80,8 @@ export default function MapOverlays() {
   const setBasemap = useStore((s) => s.setBasemap);
   const map3d = useStore((s) => s.map3d);
   const sim3dActive = useStore((s) => s.sim3dActive);
+  const sim3dReady = useStore((s) => s.sim3dReady);
+  const animSpeed = useStore((s) => s.animSpeed);
   const sim3dImpact = useStore((s) => s.sim3dImpact);
   const setSim3d = useStore((s) => s.setSim3d);
   const simResult = useStore((s) => s.simResult);
@@ -85,10 +89,13 @@ export default function MapOverlays() {
   const animTimeSec = useStore((s) => s.animTimeSec);
   const setAnim = useStore((s) => s.setAnim);
 
+  const simSlope = simResult ? slopes.find(s => s.id === simResult.slopeId) : undefined;
+  const moment = simResult ? simulationMoment(simResult, animTimeSec) : null;
+
   // the Scenario tab's playback clock unmounts with the command centre, so the 3D HUD keeps its own — at half the
   // tab's pace (2 sim s per real s): the cinematic view needs the 60 s to unfold over half a minute, not 15 s
   useEffect(() => {
-    if (!sim3dActive || !animPlaying) return;
+    if (!sim3dActive || !sim3dReady || !animPlaying) return;
     let raf = 0;
     let last = performance.now();
     const loop = (now: number) => {
@@ -97,7 +104,7 @@ export default function MapOverlays() {
         return;
       }
       const st = useStore.getState();
-      const next = st.animTimeSec + ((now - last) / 1000) * st.animSpeed * 2;
+      const next = st.animTimeSec + Math.min(0.15, (now - last) / 1000) * st.animSpeed * 2;
       last = now;
       if (next >= 60) st.setAnim({ timeSec: 60, playing: false });
       else {
@@ -107,7 +114,7 @@ export default function MapOverlays() {
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [sim3dActive, animPlaying]);
+  }, [sim3dActive, sim3dReady, animPlaying]);
 
   // cinematic mode: the side panels, legend, search and banners step aside while the playback runs (styles.ux.css)
   useEffect(() => {
@@ -156,6 +163,7 @@ export default function MapOverlays() {
   if (layers.historicalLandslides) symbolRows.push({ label: "Past failure", color: "#e04a3a", shape: "ring", hint: "Historical landslide on record" });
   if (layers.drainage) symbolRows.push({ label: "Drainage / utility", color: "#38b6d8", shape: "dot", hint: "Drainage culvert or utility asset" });
   if (layers.floodZones) symbolRows.push({ label: "Indicative flood zone", color: "#3d8bfd", shape: "area", hint: "Ponding area around drainage assets" });
+  if (layers.stormGrid) symbolRows.push({ label: "Expected landslides per 750 × 600 m cell (PoLA)", color: "#b3261e", shape: "area", hint: "Σ P(H|R) over the cell's inventory slopes this storm — pale < 0.01, dark ≥ 0.5" });
   if (layers.csdiSlopes) symbolRows.push({ label: "Registered slope (CEDD, live)", color: "#18b8a6", shape: "area", hint: "Real Catalogue of Slopes polygon — zoom in to load" });
   if (layers.csdiLandslides) symbolRows.push({ label: "Past landslide (CEDD, live)", color: "#ff9d42", shape: "dot", hint: "Real landslide incident record" });
   if (layers.csdiBlackspots) symbolRows.push({ label: "Flood blackspot (DSD, live)", color: "#63b3ff", shape: "ring", hint: "Real DSD flooding blackspot" });
@@ -283,33 +291,54 @@ export default function MapOverlays() {
         </div>
       )}
 
-      {sim3dActive && (
-        <div className="sim3d-hud">
-          <div className="sim3d-title">
-            3D playback <span className="tag">illustrative</span>
-            {simResult && (
-              <span className="sim3d-sub">
-                {simResult.params.rainfallMm} mm / {simResult.params.rainfallDurationH} h{simResult.params.seismicPga > 0 ? ` · quake ${simResult.params.seismicPga} g` : ""} · runout {simResult.runoutDistanceM} m
-                {sim3dImpact ? ` · ${sim3dImpact.phase} · front ${sim3dImpact.frontM} m` : ""}
-              </span>
-            )}
+      {sim3dActive && simResult && (
+        <>
+          <div className="sim3d-location">
+            <span className="sim3d-eyebrow">SCENARIO LOCATION | HONG KONG</span>
+            <strong>{simSlope?.name ?? simResult.slopeId}</strong>
+            <span>{simSlope?.district} | {simResult.slopeId}</span>
+            <small>{simResult.runoutPath[0][1].toFixed(5)} N, {simResult.runoutPath[0][0].toFixed(5)} E</small>
           </div>
-          <div className="sim3d-tally">
-            <span><b>{sim3dImpact?.buildings ?? 0}</b> buildings hit</span>
-            {(sim3dImpact?.barriersInScene ?? 0) > 0 && <span title="CEDD-registered defence measures (ND) in the scene, drawn as indicative 4 m walls — the published data has no barrier height"><b>{sim3dImpact?.barriers ?? 0}</b>/{sim3dImpact?.barriersInScene} barriers reached</span>}
-            <span><b>{sim3dImpact?.roads ?? 0}</b> road segments</span>
-            <span><b>{sim3dImpact?.people ?? 0}</b> people</span>
-            <span><b>{sim3dImpact?.vehicles ?? 0}</b> vehicles</span>
+          <div className="sim3d-hud" role="region" aria-label="3D scenario playback">
+            <div className="sim3d-title">
+              {simResult.failureLikely ? "Slope failure scenario" : "Stable slope scenario"} <span className="tag">illustrative</span>
+              <span className="sim3d-sub">{simResult.params.rainfallMm} mm / {simResult.params.rainfallDurationH} h{simResult.params.seismicPga > 0 ? ` | quake ${simResult.params.seismicPga} g` : ""}</span>
+            </div>
+            <div className="sim3d-phase" role="status">
+              <b>{!sim3dReady ? "Preparing the site..." : moment?.phase === "settled" ? "Event complete" : moment?.phase}</b>
+              <span>{!sim3dReady ? "Framing the slope and loading local terrain and assets." : moment?.note}</span>
+            </div>
+            <div className="sim3d-views" aria-label="Scene camera views">
+              <button onClick={() => sendViewCmd("scene")} disabled={!sim3dReady}>Recenter site</button>
+              <button onClick={() => sendViewCmd("source")} disabled={!sim3dReady}>Source slope</button>
+              {simResult.failureLikely && <button onClick={() => sendViewCmd("toe")} disabled={!sim3dReady}>Runout end</button>}
+              <span>{simResult.failureLikely ? `Gold: modelled route | front ${sim3dImpact?.frontM ?? 0} / ${simResult.runoutDistanceM} m` : "Green: tested slope | no debris released"}</span>
+            </div>
+            {simResult.failureLikely && <div className="sim3d-tally">
+              <span><b>{sim3dImpact?.buildings ?? 0}</b> buildings reached</span>
+              {(sim3dImpact?.barriersInScene ?? 0) > 0 && <span><b>{sim3dImpact?.barriers ?? 0}</b>/{sim3dImpact?.barriersInScene} barriers</span>}
+              <span><b>{sim3dImpact?.roads ?? 0}</b> road segments</span>
+              <span><b>{sim3dImpact?.people ?? 0}</b> demo people</span>
+              <span><b>{sim3dImpact?.vehicles ?? 0}</b> demo vehicles</span>
+            </div>}
+            <div className="sim3d-controls">
+              <button disabled={!sim3dReady} onClick={() => setAnim({ ...(animTimeSec >= 60 ? { timeSec: 0 } : {}), playing: !animPlaying })} aria-label={animPlaying ? "Pause playback" : "Play playback"}>{animPlaying ? "Pause" : "Play"}</button>
+              <button disabled={!sim3dReady} onClick={() => setAnim({ timeSec: 0, playing: true })} title="Restart playback">Replay</button>
+              <input aria-label="Playback time" disabled={!sim3dReady} type="range" min={0} max={60} step={0.5} value={animTimeSec} onChange={(e) => setAnim({ timeSec: +e.target.value, playing: false })} />
+              <span className="t">{animTimeSec.toFixed(0)} s</span>
+              <select aria-label="Playback speed" value={animSpeed} onChange={e => setAnim({ speed: +e.target.value })}>
+                <option value={0.5}>0.5x</option><option value={1}>1x</option><option value={2}>2x</option><option value={4}>4x</option>
+              </select>
+              <button onClick={() => setSim3d(false)} title="Back to the Command Center">Exit</button>
+            </div>
+            <div className="sim3d-chapters" aria-label="Playback chapters">
+              {(simResult.failureLikely ? [{ t: 0, label: "Rainfall" }, { t: 18, label: "Deformation" }, { t: simResult.params.seismicPga >= 0.05 ? 24 : 32, label: "Runout" }, { t: 60, label: "Outcome" }] : [{ t: 0, label: "Rainfall" }, { t: 18, label: "Response" }, { t: 60, label: "Stable outcome" }]).map(c => <button key={c.t} disabled={!sim3dReady} onClick={() => setAnim({ timeSec: c.t, playing: false })}>{c.label}</button>)}
+            </div>
+            <div className="sim3d-note">Demonstration model — not for engineering decisions. 60 s is a compressed event timeline; on-map counts are illustrative contacts, not casualty estimates.
+              {sim3dReady && <span className="sim3d-context">{sim3dImpact?.roadContext}. {sim3dImpact?.buildingsInScene ?? 0} building footprints loaded.{sim3dImpact && !sim3dImpact.terrainReady ? " Terrain incomplete; elevations may be approximate." : ""}</span>}
+            </div>
           </div>
-          <div className="sim3d-controls">
-            <button onClick={() => setAnim({ playing: !animPlaying })} title={animPlaying ? "Pause" : "Play"}>{animPlaying ? "⏸" : "▶"}</button>
-            <button onClick={() => setAnim({ timeSec: 0, playing: true })} title="Restart">⟲</button>
-            <input type="range" min={0} max={60} step={0.5} value={animTimeSec} onChange={(e) => setAnim({ timeSec: +e.target.value, playing: false })} />
-            <span className="t">{animTimeSec.toFixed(0)} s</span>
-            <button onClick={() => setSim3d(false)} title="Back to the Command Center">Exit</button>
-          </div>
-          <div className="sim3d-note">Runout is the scenario engine's result, not a physical simulation. People and vehicles are synthetic placements on real LandsD road centrelines.</div>
-        </div>
+        </>
       )}
 
       <div className="cam-controls" title="Zoom, rotate and tilt the 3D view. Scroll to zoom; right-drag (or Ctrl+drag) to rotate.">

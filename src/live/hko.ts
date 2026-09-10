@@ -73,6 +73,32 @@ export async function fetchLiveRain(): Promise<LiveRain> {
   }
 }
 
+// ---------- HKO gridded rainfall nowcast (REAL, via server proxy only — the CSV has no CORS header) ----------
+
+export interface NowcastStation { id: string; name: string; mm30: number[]; mm2h: number }
+export interface Nowcast {
+  updated: string;
+  steps: string[];
+  fetchedAt: string;
+  cells: number;
+  territory: { max2h: number; mean2h: number };
+  stations: NowcastStation[];
+}
+
+export async function fetchNowcast(): Promise<Nowcast | null> {
+  try {
+    const r = await fetch("/api/live/nowcast", { headers: { accept: "application/json" }, cache: "no-store", signal: AbortSignal.timeout(12_000) });
+    if (!r.ok || !(r.headers.get("content-type") ?? "").includes("json")) throw new Error(`nowcast ${r.status}`);
+    const j = (await r.json()) as Nowcast & { error?: string };
+    if (j.error || !Array.isArray(j.stations)) throw new Error(j.error ?? "bad payload");
+    reportSource("hko-nowcast", { ok: true, count: j.stations.length, note: `issued ${j.updated.slice(11, 16)} HKT · next 2 h mean ${j.territory.mean2h} mm · max ${j.territory.max2h} mm` });
+    return j;
+  } catch (err) {
+    reportSource("hko-nowcast", { ok: false, note: String((err as Error)?.message ?? err) });
+    return null;
+  }
+}
+
 /** Poll HKO on a real-time interval; returns a stop function. `immediate=false` skips the first tick (already fetched at boot). */
 export function startLiveRainPolling(onUpdate: (r: LiveRain) => void, intervalMs = 5 * 60_000, immediate = true): () => void {
   let stopped = false;

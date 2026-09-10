@@ -1,4 +1,5 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import { LATEST_RELEASE, latestSeen } from "@/core/changelog";
 import { useStore } from "./state/store";
 import TopBar from "./components/TopBar";
 import KpiPanel from "./components/KpiPanel";
@@ -17,8 +18,10 @@ export default function App() {
   const view = useStore((s) => s.view);
   const role = useStore((s) => s.role);
   const commandCenterOpen = useStore((s) => s.commandCenterOpen);
+  const sim3dActive = useStore((s) => s.sim3dActive);
   const setView = useStore((s) => s.setView);
   const setReportsTab = useStore((s) => s.setReportsTab);
+  const [whatsNewUnseen, setWhatsNewUnseen] = useState(() => !latestSeen());
 
   useEffect(() => {
     void useStore.getState().init();
@@ -73,6 +76,17 @@ export default function App() {
         >
           Data sources →
         </button>
+        <button
+          className={`banner-link ${whatsNewUnseen ? "glow" : ""}`}
+          onClick={() => {
+            setReportsTab("whatsnew");
+            setView("reports");
+            setWhatsNewUnseen(false);
+          }}
+          title={`Latest: ${LATEST_RELEASE.title} (${LATEST_RELEASE.date})`}
+        >
+          {whatsNewUnseen && <span className="new-dot" />}What's new →
+        </button>
       </div>
       <TopBar />
       {view === "emergency" && (
@@ -84,13 +98,13 @@ export default function App() {
       <div className="main">
         {(
           <>
-            {view === "overview" && role !== "public" && !inspecting && <KpiPanel />}
+            {view === "overview" && role !== "public" && !inspecting && !sim3dActive && <KpiPanel />}
             <div className="map-wrap" style={mapVisible ? undefined : { display: "none" }}>
               <MapView />
               <MapOverlays />
             </div>
-            {view === "overview" && !inspecting && <RightPanel />}
-            {view === "emergency" && !inspecting && <EmergencyPanel />}
+            {view === "overview" && !inspecting && !sim3dActive && <RightPanel />}
+            {view === "emergency" && !inspecting && !sim3dActive && <EmergencyPanel />}
             {mapVisible && inspecting && <SlopeCommandCenter />}
           </>
         )}

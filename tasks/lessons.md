@@ -1,5 +1,14 @@
 # Lessons
 
+- **Mistake:** The map rendered at pixel ratio 1 while the attached 3D canvas tracked a different drawing-buffer size on a fractionally scaled display. Geographic projections agreed numerically, but the rendered debris appeared away from the site.
+  **Rule:** With MapLibre 4 and deck.gl 9.4 interleaving, compare the actual canvas dimensions with luma's `getDrawingBufferSize()` AND its default framebuffer wrapper. MapLibre can resize the canvas first, causing luma to skip updating the wrapper; a stale wrapper height produces a nonzero GL viewport Y offset. Mirror both dimensions before each shared render pass. Verify rendered geometry after resizing, not just `project()` coordinates.
+
+- **Mistake:** Scene geometry and DEM heights were sampled before the camera arrived and stayed cached after zooming. Empty roads, floating debris and missing context followed.
+  **Rule:** Frame the complete source and runout before initializing the scene, refresh elevations after movement or DEM tile updates, and identify missing geometry explicitly. Stable outcomes need a visible site and explanation as well. Replay must reuse seeded placements and derive contacts from model time.
+
+- **Mistake:** A MapLibre 4 camera animation applied a cloned transform whose elevation was still zero; a correct longitude/latitude then appeared above the screen in a pitched close-up.
+  **Rule:** During terrain playback, use the supported `transformCameraUpdate` hook to resolve camera target elevation from the DEM, preserve any existing hook, and restore it on disposal. Check the actual site remains inside the visible area after camera commands.
+
 - **Mistake:** (preemptive, from initial brief) Risk of presenting synthetic values as real HK government data, and of coupling frontend to mock JSON.
   **Rule:** Every generated value carries `isSynthetic: true` provenance and visible SYNTHETIC banners/badges; components only consume `core/interfaces.ts` via `core/registry.ts` — never import `src/mock/*` directly.
 
@@ -86,3 +95,9 @@
   below that). 3D defaults on (`map3d: true`), pixel ratio pinned to 1 on integrated GPUs, and the glass blur is dropped while
   the map is moving (`.main.map-moving`). Measured: 55 fps with terrain, wheel-to-frame ≈ 30 ms.
 
+
+- **Rule (user instruction, 2026-09-08):** the in-app *What's new* page (Reports → What's new, flagged in the top banner) must be
+  updated after every new feature. It is generated from `src/core/changelog.ts` — releases newest first, each item with kind
+  (feature / real data / model / interface / fix), what changed, where to find it, and the `calc` / `source` ids of the
+  registry rows behind it. **Every feature, data source, model or calculation change adds an entry in the same commit**;
+  bump the release `id` so the banner lights up again for returning viewers.

@@ -262,7 +262,7 @@ pre.report { border: none; background: var(--glass-light); border-radius: var(--
 /* ---------- alignment: one gutter system ---------- */
 /* toolbar text starts 24 px from the window edge (10 margin + 14 padding); pages and panels share that gutter */
 .page { padding: 14px 14px 28px; }
-.page > * { max-width: 1180px; }
+.page > * { max-width: none; } /* tables use the whole page; prose keeps its own measure via .sub */
 .panel { padding: 12px 16px; }
 .kpi-rows { margin: 0 -6px; }
 .hint-card { margin: 10px 16px 0; }
@@ -524,3 +524,13 @@ input[type="range"]::-moz-range-thumb { width: 20px; height: 20px; border: none;
 /* 2D / 3D switch in the camera pill */
 .cam-controls button.mode { font: 700 10.5px var(--sans); letter-spacing: 0.02em; }
 .cam-controls button.mode.on { background: var(--accent); color: #fff; }
+
+/* ---- Side panels: keep the scrollbar inside the rounded card, one line per KPI row ---- */
+.side { clip-path: inset(0 round var(--r-xl)); scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.18) transparent; }
+.side::-webkit-scrollbar { width: 5px; }
+.side::-webkit-scrollbar-track { margin: 16px 0; }
+.kpi-row .l { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kpi-row .l .term { white-space: nowrap; }
+.kpi-row .v { white-space: nowrap; }
+.tile .tile-l { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile .tile-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

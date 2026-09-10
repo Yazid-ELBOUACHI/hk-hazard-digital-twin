@@ -7,6 +7,9 @@ import { generateSitrep } from "./sitrep";
 import { optimizePortfolio } from "./optimizer";
 import type { InterventionOption } from "@/core/types";
 import { fmtInt } from "@/core/format";
+import { GLOSSARY } from "@/core/glossary";
+import { CALCULATIONS, DATA_SOURCES } from "@/core/dataSources";
+import { buildStormReport } from "@/decision/stormReport";
 
 export interface TwinContext {
   gameTime: number;
@@ -33,7 +36,11 @@ const HELP = `I can answer questions about the synthetic twin state, e.g.:
 • "Which intervention gives the best risk reduction?"
 • "Show slopes with high risk and low confidence"
 • "Which slopes have stale geometry?"
-• "Prepare a situation report"`;
+• "Prepare a situation report"
+• "Storm report" / "How many landslides are expected?"
+• "What should we observe next?" / "Where is the value of information highest?"
+• "What does the nowcast say for the next 2 hours?"
+• "How is PLL calculated?" / "What is the census term?" — grounded on the calculation registry`;
 
 export function askTwin(question: string, ctx: TwinContext): TwinAnswer {
   const q = question.toLowerCase();
@@ -70,6 +77,60 @@ export function askTwin(question: string, ctx: TwinContext): TwinAnswer {
         text: `${id} (${s.district}, ${s.region}): ${a.category.toUpperCase()} ${a.score}/100, trend ${a.trend}, confidence ${Math.round(a.confidence * 100)}%. ${a.explanation}`,
         slopeIds: [id],
       };
+  }
+
+  // --- grounded explanations: glossary + calculation registry + datasets ---
+  if (/how (is|are|do you|does|was)|calculated|formula|what is|what does|what are|define|meaning of|explain (the |what )?(pll|voi|census|entli|magnitude|score|occurrence|vulnerability|nowcast|uncertainty|evpi)/.test(q) && !idMatch) {
+    const words = q.replace(/[^a-z0-9|() ]/g, " ").split(/\s+/).filter((w) => w.length >= 3 && !["what", "how", "the", "does", "are", "is", "calculated", "define", "explain", "meaning", "you", "twin", "this", "that", "with", "for", "and"].includes(w));
+    const score = (text: string) => words.reduce((s, w) => s + (text.toLowerCase().includes(w) ? 1 : 0), 0);
+    const hits = [
+      ...Object.entries(GLOSSARY).map(([id, g]) => ({ kind: "term", id, name: g.label, score: score(`${id} ${g.label} ${g.what}`) * 2, body: g.what, calc: g.calc })),
+      ...CALCULATIONS.map((c) => ({ kind: "calc", id: c.id, name: c.name, score: score(`${c.name} ${c.output} ${c.how.join(" ")}`), body: `${c.output}\n${c.how.map((h) => `  – ${h}`).join("\n")}\n  inputs: ${c.inputs.join("; ")}${c.reference ? `\n  reference: ${c.reference}` : ""}\n  code: ${c.code}`, calc: c.id })),
+      ...DATA_SOURCES.map((d) => ({ kind: "dataset", id: d.id, name: d.name, score: score(`${d.name} ${d.provider} ${d.what}`), body: `${d.what}\n  used for: ${d.usedFor}\n  ${d.connection} · ${d.realness} · ${d.freshness}`, calc: undefined as string | undefined })),
+    ]
+      .filter((h) => h.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 3);
+    if (hits.length) {
+      return {
+        text: hits.map((h) => `${h.kind === "term" ? "◆" : h.kind === "calc" ? "∑" : "▣"} ${h.name}\n${h.body}${h.calc ? `\n  → Reports → Data Sources → How it is calculated (${h.calc})` : ""}`).join("\n\n") + "\n\nGrounded on the twin's own glossary, calculation registry and dataset registry (src/core/dataSources.ts) — no external model.",
+      };
+    }
+  }
+
+  // --- storm report (PoLA) ---
+  if (q.includes("storm report") || q.includes("expected landslides") || q.includes("how many landslides") || q.includes("prompt risk")) {
+    if (!slopes.length || !assessments.size) return { text: "The first risk pass has not finished yet — try again in a moment." };
+    return { text: buildStormReport(slopes, assessments, ctx.weather, ctx.kpi, ctx.gameTime).text };
+  }
+
+  // --- value of information: what to observe / investigate next ---
+  if (q.includes("observe") || q.includes("value of information") || q.includes("voi") || q.includes("measure next") || q.includes("inspect next") || q.includes("where to inspect") || q.includes("investigate") || q.includes("evpi")) {
+    const storm = /storm|now|today|tonight|precaution/.test(q);
+    const pick = (a: RiskAssessment) => (storm ? a.qra?.voi : a.qra?.voiUpgrade);
+    const rows = ranked.filter(({ a }) => pick(a)?.best).sort((x, y) => pick(y.a)!.best!.voiHKDm - pick(x.a)!.best!.voiHKDm).slice(0, 8);
+    if (!rows.length) return { text: "No value-of-information results yet — wait for the first risk pass." };
+    return {
+      text:
+        (storm
+          ? `Where one observation would most change this storm's precautionary decision (value of information per HK$ and hour):\n`
+          : `Where one investigation would most change the decision to upgrade the slope (HK$5 M, 25-year horizon):\n`) +
+        rows
+          .map(({ s, a }) => {
+            const v = pick(a)!;
+            return `• ${s.id} (${s.district}) — ${a.category.toUpperCase()}, ${storm ? `P(H|R) ${a.qra!.pFailure5.toExponential(1)}–${a.qra!.pFailure95.toExponential(1)}` : `annual P(failure) ${a.qra!.pAnnual.toExponential(1)}`}: ${v.best!.label}, VOI HK$${v.best!.voiHKDm.toFixed(3)} M for HK$${v.best!.costHKDm} M in ${v.best!.hours} h (×${v.best!.ratio.toFixed(2)}${v.worthIt ? ", pays for itself" : ", below its cost"}); decision on the prior: ${v.decision}`;
+          })
+          .join("\n") +
+        `\n\nPreposterior analysis on the PoLA occurrence belief (σ on the log-odds); VSL HK$30 M, precaution HK$0.08 M, upgrade HK$5 M over 25 y, observation costs assumed. Add "storm" for the precaution decision; Planning → “Where to investigate next”.`,
+      slopeIds: rows.map(({ s }) => s.id),
+    };
+  }
+
+  // --- HKO nowcast ---
+  if (q.includes("nowcast") || q.includes("next 2 hours") || q.includes("next two hours") || q.includes("next 2 h")) {
+    const n = ctx.weather?.nowcast;
+    if (!n) return { text: "The HKO 2-hour gridded nowcast is not reachable right now (it needs the server proxy at /api/live/nowcast)." };
+    return { text: `HKO gridded rainfall nowcast issued ${n.updated.slice(11, 16)} HKT: next 2 h territory mean ${n.mean2h} mm, maximum ${n.max2h} mm at the twin's ${n.stations} stations (windows ending ${n.steps.map((t) => t.slice(11, 16)).join(", ")}). The +1 h and +3 h trajectories add the nearest station's nowcast to each slope's rainfall.` };
   }
 
   // --- what happens if rainfall reaches N mm ---

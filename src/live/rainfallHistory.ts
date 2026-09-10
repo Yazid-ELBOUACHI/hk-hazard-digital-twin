@@ -24,6 +24,7 @@ export interface RainfallHistory {
   yearOfDay(d: number): number;
   dayOfDate(iso: string): number; // -1 when outside the record
   storms: StormDay[]; // top days by territory maximum
+  stormGaugeMm(k: number): number[]; // daily total at every gauge on storm k (0 = no record)
 }
 
 let cache: Promise<RainfallHistory> | null = null;
@@ -37,6 +38,8 @@ export function loadRainfallHistory(): Promise<RainfallHistory> {
       const mon = u16(R.monthlyX10);
       const dMax = u16(R.dayMaxX10);
       const dMean = u16(R.dayMeanX10);
+      const sg = R.stormGaugeX10 ? u16(R.stormGaugeX10) : new Uint16Array(0);
+      const nG = R.gauges.length;
       const idx = new Map(R.gauges.map((g, i) => [g.id, i]));
       const nY = R.years;
       const lastDate = `${R.lastDate.slice(0, 4)}-${R.lastDate.slice(4, 6)}-${R.lastDate.slice(6, 8)}`;
@@ -61,6 +64,7 @@ export function loadRainfallHistory(): Promise<RainfallHistory> {
           return d >= 0 && d < R.days ? d : -1;
         },
         storms: R.storms,
+        stormGaugeMm: (k) => Array.from(sg.subarray(k * nG, (k + 1) * nG), (v) => v / 10),
       };
       reportSource("geo-raingauge", { ok: true, count: R.gauges.length, note: `record 1984-01-01 → ${lastDate}` });
       return h;

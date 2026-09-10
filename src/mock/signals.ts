@@ -9,7 +9,7 @@
 // the rainfall above plus per-slope noise, so time scrubbing is exact and reproducible.
 
 import type { Slope } from "@/core/types";
-import type { LiveRain, LiveStation } from "@/live/hko";
+import type { LiveRain, LiveStation, Nowcast } from "@/live/hko";
 import { GAME_EPOCH } from "./generate";
 import { clamp, smoothNoise, smoothNoiseSeed, keySeed, rngFor } from "./random";
 
@@ -55,6 +55,28 @@ export function rainIsLive(): boolean {
 }
 export function liveRain24Known(): boolean {
   return liveMean24 !== null;
+}
+
+// ---- HKO 2-hour gridded nowcast (REAL) ----
+let nowcast: Nowcast | null = null;
+let nowcastById = new Map<string, number[]>();
+export function setNowcast(n: Nowcast | null) {
+  nowcast = n;
+  nowcastById = new Map((n?.stations ?? []).map((s) => [s.id, s.mm30]));
+}
+export function getNowcast(): Nowcast | null {
+  return nowcast;
+}
+/** Rainfall the nowcast expects at the slope's nearest HKO station over the next `plusHours` (capped at its 2-h horizon). */
+export function nowcastForSlope(slope: Slope, plusHours: number): number {
+  if (!nowcast || plusHours <= 0) return 0;
+  const st = stationFor(slope);
+  const mm30 = st ? nowcastById.get(st.id) : undefined;
+  if (!mm30) return 0;
+  const steps = Math.min(mm30.length, Math.ceil(Math.min(2, plusHours) * 2));
+  let sum = 0;
+  for (let i = 0; i < steps; i++) sum += mm30[i];
+  return sum;
 }
 
 function stationFor(slope: Slope): LiveStation | null {

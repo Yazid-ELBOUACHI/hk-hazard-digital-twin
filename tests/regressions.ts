@@ -2,13 +2,43 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { fmtClock } from "../src/core/format";
 import { slopeCamera } from "../src/core/mapSelection";
+import { clipSceneRoad, simulationBounds, simulationMoment } from "../src/core/simulationScene";
 import { HeuristicRiskEngine } from "../src/core/riskEngine";
 import { setMapInteracting } from "../src/core/schedule";
 import { GAME_EPOCH } from "../src/mock/generate";
 import { featuresFor, projectedRain24, rainRateAt, regionalRainFactor, setLiveRain, setStormOverlay, slopeRain, stormRateAt } from "../src/mock/signals";
 import { useStore } from "../src/state/store";
 import { registry } from "../src/core/registry";
-import type { Slope, SimulationJob } from "../src/core/types";
+import type { Slope, SimulationJob, SimulationResult } from "../src/core/types";
+
+test("simulation bounds include a long runout and lateral deposit, without depending on aspect", () => {
+  const result = { runoutPath: [[114.15, 22.28], [114.159, 22.285]] } as SimulationResult;
+  const bounds = simulationBounds(result, slope);
+  for (const [x, y] of [...result.runoutPath, ...slope.polygon]) {
+    assert.ok(x > bounds[0][0] && x < bounds[1][0]);
+    assert.ok(y > bounds[0][1] && y < bounds[1][1]);
+  }
+});
+
+test("scene road clipping retains crossings with both endpoints outside and excludes distant traffic", () => {
+  assert.deepEqual(clipSceneRoad([[-1000, 0], [1000, 0]], 420), [[[-420, 0], [420, 0]]]);
+  assert.deepEqual(clipSceneRoad([[-1000, 500], [1000, 500]], 420), []);
+  assert.deepEqual(clipSceneRoad([[0, 0], [0, 0]], 420), [[[0, 0], [0, 0]]]);
+  assert.deepEqual(clipSceneRoad([[0, 0], [100, 100], [1000, 100]], 420), [[[0, 0], [100, 100], [420, 100]]]);
+});
+
+test("playback interpolation is reversible and stable scenarios never emit debris", () => {
+  const result = { failureLikely: true, frames: [
+    { tSec: 0, debrisFrontM: 0, phase: "rainfall" },
+    { tSec: 30, debrisFrontM: 0, phase: "runout" },
+    { tSec: 60, debrisFrontM: 300, phase: "settled" },
+  ] } as SimulationResult;
+  assert.equal(simulationMoment(result, 45).debrisFrontM, 150);
+  assert.equal(simulationMoment(result, 100).debrisFrontM, 300);
+  assert.equal(simulationMoment(result, 0).debrisFrontM, 0);
+  assert.equal(simulationMoment(result, 45).debrisFrontM, 150);
+  assert.equal(simulationMoment({ ...result, failureLikely: false }, 60).debrisFrontM, 0);
+});
 
 const slope: Slope = {
   id: "11SW-A/C 123", name: "Test slope", region: "HK Island", district: "Central & Western",
@@ -26,6 +56,23 @@ test("Hong Kong clock rolls date/year correctly, independent of computer timezon
   assert.equal(fmtClock(Date.parse("2026-12-31T16:00:00Z")), "00:00 HKT · 2027-01-01");
   assert.ok(Math.abs(GAME_EPOCH - Date.now()) < 60_000);
   assert.equal(useStore.getState().speed, 1);
+});
+
+test("3D playback opens stable results from 2D, waits for readiness and restores the map on exit", () => {
+  useStore.setState({ selectedSlopeId: slope.id, simResult: { slopeId: slope.id, failureLikely: false } as SimulationResult, basemap: "light", map3d: false, sim3dActive: false });
+  useStore.getState().setSim3d(true);
+  assert.equal(useStore.getState().sim3dActive, true);
+  assert.equal(useStore.getState().map3d, true);
+  assert.equal(useStore.getState().sim3dReady, false);
+  assert.equal(useStore.getState().animPlaying, false);
+  assert.equal(useStore.getState().commandCenterOpen, false);
+  useStore.getState().setSim3d(false);
+  assert.equal(useStore.getState().basemap, "light");
+  assert.equal(useStore.getState().map3d, false);
+  assert.equal(useStore.getState().commandCenterOpen, true);
+  useStore.setState({ simResult: null });
+  useStore.getState().setSim3d(true);
+  assert.equal(useStore.getState().sim3dActive, false);
 });
 
 test("camera includes the entire polygon and leaves room inside a narrow map", () => {

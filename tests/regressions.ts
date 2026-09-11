@@ -1,5 +1,62 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { CALCULATIONS, DATA_SOURCES } from "../src/core/dataSources";
+import { CALCULATION_GUIDE, matchesDataSearch } from "../src/core/calculationGuide";
+import { GLOSSARY } from "../src/core/glossary";
+import katex from "katex";
+import { CALCULATION_FORMULAS, FORMULA_OPERATORS, formulaSearchFields } from "../src/core/calculationFormulas";
+
+test("all calculation formulas and symbols typeset without errors and retain accessible MathML", () => {
+  assert.deepEqual(Object.keys(CALCULATION_FORMULAS).sort(), CALCULATIONS.map(c => c.id).sort());
+  for (const [id, guide] of Object.entries(CALCULATION_FORMULAS)) {
+    if (guide.equations.length) assert.ok(guide.symbols.length, `${id}: missing symbol definitions`);
+    const expressions = [...guide.equations.map(e => e.tex), ...guide.symbols.map(s => s[0])];
+    for (const expression of expressions) {
+      const html = katex.renderToString(expression, { throwOnError: true, strict: "error", trust: false, output: "htmlAndMathml" });
+      assert.ok(html.includes("<math"), `${id}: missing accessible math`);
+      assert.ok(!html.includes('class="katex-error"'), id);
+    }
+    for (const equation of guide.equations) assert.ok(equation.label && equation.reading, id);
+    for (const symbol of guide.symbols) assert.ok(symbol.every(Boolean), `${id}: incomplete symbol definition`);
+  }
+  for (const [expression] of FORMULA_OPERATORS) katex.renderToString(expression, { throwOnError: true, strict: "error" });
+});
+
+test("search includes variable definitions and equation explanations", () => {
+  assert.ok(matchesDataSearch("peak ground acceleration", formulaSearchFields(CALCULATION_FORMULAS["calc-scenario-prob"])));
+  assert.ok(matchesDataSearch("normalise consequence", formulaSearchFields(CALCULATION_FORMULAS["calc-score"])));
+  assert.deepEqual(formulaSearchFields(undefined), []);
+});
+
+test("every calculation has a plain-language explanation and glossary links resolve", () => {
+  assert.equal(new Set(CALCULATIONS.map(c => c.id)).size, CALCULATIONS.length);
+  assert.deepEqual(Object.keys(CALCULATION_GUIDE).sort(), CALCULATIONS.map(c => c.id).sort());
+  for (const c of CALCULATIONS) {
+    assert.ok(CALCULATION_GUIDE[c.id].summary.trim());
+    assert.ok(CALCULATION_GUIDE[c.id].interpretation.trim());
+  }
+  const targets = new Set([...CALCULATIONS, ...DATA_SOURCES].map(c => c.id));
+  for (const entry of Object.values(GLOSSARY)) {
+    if (entry.calc) assert.ok(targets.has(entry.calc), entry.calc);
+    if (entry.source) assert.ok(targets.has(entry.source), entry.source);
+  }
+});
+
+test("data search matches plain language, formulas, publishers and multiple fields", () => {
+  const fieldsFor = (id: string) => {
+    const c = CALCULATIONS.find(c => c.id === id)!;
+    return [...Object.values(c), ...Object.values(CALCULATION_GUIDE[id])];
+  };
+  assert.ok(matchesDataSearch("  ", []));
+  assert.ok(matchesDataSearch("SOIL pressure", fieldsFor("calc-signals")));
+  assert.ok(matchesDataSearch("sigmoid", fieldsFor("calc-occurrence")));
+  assert.ok(matchesDataSearch("geotechnique", fieldsFor("calc-occurrence")));
+  assert.ok(matchesDataSearch("HKO rainfall", Object.values(DATA_SOURCES.find(d => d.id === "hko-live")!)));
+  assert.ok(matchesDataSearch("  census   circle ", fieldsFor("calc-residents")));
+  assert.equal(matchesDataSearch("census missingword", fieldsFor("calc-residents")), false);
+  assert.equal(matchesDataSearch("[", ["rainfall"]), false);
+  assert.ok(matchesDataSearch("rain", [undefined, null, ["rainfall"]]));
+});
 import { fmtClock } from "../src/core/format";
 import { slopeCamera } from "../src/core/mapSelection";
 import { clipSceneRoad, simulationBounds, simulationMoment } from "../src/core/simulationScene";

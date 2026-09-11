@@ -375,6 +375,52 @@ input[type="range"] { accent-color: var(--accent); }
 .ds-legend { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 11px; color: var(--text-2); margin: 6px 0 14px; }
 .ds-legend .chip { pointer-events: none; }
 .ds-group { margin-bottom: 18px; }
+.ds-search label { display: block; font-weight: 600; margin-bottom: 8px; }
+.ds-quick-guide { margin: 14px 0; line-height: 1.6; }
+.ds-quick-links { display: flex; flex-wrap: wrap; gap: 8px; }
+.explanation-link { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 11px; }
+.explanation-link a { color: var(--accent); }
+.explanation-link input { width: 100%; min-width: 0; }
+.ds-search-controls { display: flex; gap: 8px; flex-wrap: wrap; }
+.ds-search-controls input { flex: 1; min-width: 180px; padding: 10px 12px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--bg-1, var(--bg-2)); color: var(--text-0); font: inherit; }
+.calc-reading-guide { margin: 14px 0; line-height: 1.65; }
+.calc-reading-guide summary, .calc-technical summary { cursor: pointer; font-weight: 600; }
+.calc-expand { display: flex; align-items: center; gap: 8px; margin: 14px 0; }
+.calc-entry { padding: 20px 0; border-top: 1px solid var(--line-soft); scroll-margin-top: 24px; font-size: 14px; line-height: 1.65; overflow-wrap: anywhere; }
+.calc-entry-heading { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.calc-entry h4 { margin: 0; font-size: 15px; }
+.calc-entry p { margin: 10px 0; max-width: 100ch; }
+.calc-interpretation { color: var(--text-1); }
+.calc-technical { margin-top: 12px; font-size: 13px; }
+.calc-technical h5 { margin: 14px 0 6px; font-size: 13px; }
+.calc-technical ul, .calc-technical ol { padding-left: 24px; }
+.calc-technical li { margin-bottom: 8px; max-width: 110ch; }
+.calc-code { font-family: var(--mono); font-size: 11px; color: var(--text-2); }
+.formula-convention, .formula-note { color: var(--text-1); }
+.formula-card { margin: 18px 0; padding: 16px 20px; border: 1px solid var(--line-soft); border-radius: 12px; background: var(--bg-1, var(--bg-2)); max-width: 1100px; min-width: 0; }
+.formula-card figcaption { display: flex; align-items: center; gap: 10px; font-weight: 600; color: var(--text-0); font-size: 14px; }
+.formula-number { display: inline-flex; justify-content: center; align-items: center; min-width: 25px; height: 25px; border-radius: 50%; background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); font-size: 12px; }
+.formula-scroll { overflow-x: auto; padding: 10px 2px; font-size: 17px; }
+.formula-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.formula-scroll .katex-display { margin: 0.65em 0; text-align: left; }
+.formula-scroll .katex-display > .katex { text-align: left; }
+.formula-card .formula-reading { margin: 4px 0 0; color: var(--text-1); font-size: 13px; line-height: 1.65; }
+.math-expression { overflow-wrap: normal; word-break: normal; }
+.formula-table-wrap { overflow-x: auto; max-width: 1100px; margin: 16px 0; }
+.formula-symbols { width: 100%; border-collapse: collapse; font-size: 13px; line-height: 1.6; text-align: left; }
+.formula-symbols caption { text-align: left; color: var(--text-0); font-size: 14px; font-weight: 650; margin-bottom: 8px; }
+.formula-symbols th, .formula-symbols td { padding: 10px 12px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+.formula-symbols thead th { color: var(--text-1); font-size: 12px; font-weight: 600; background: var(--bg-1, var(--bg-2)); }
+.formula-symbols tbody th { font-weight: normal; width: 22%; min-width: 130px; }
+.formula-symbols td:last-child { width: 20%; min-width: 110px; color: var(--text-1); }
+.formula-symbols td:nth-child(2) { min-width: 220px; }
+.formula-symbols .katex { font-size: 1.13em; }
+.formula-operators, .formula-method-notes { margin: 16px 0; }
+@media (max-width: 700px) {
+  .formula-card { padding: 12px; }
+  .formula-scroll { font-size: 15px; }
+  .formula-symbols th, .formula-symbols td { padding: 8px; }
+}
 .ds-group h3 { margin-bottom: 8px; }
 table.data.ds { table-layout: fixed; min-width: 1080px; width: 100%; }
 table.data.ds th:nth-child(1) { width: 17%; } table.data.ds th:nth-child(2) { width: 33%; } table.data.ds th:nth-child(3) { width: 9%; }

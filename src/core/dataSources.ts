@@ -485,7 +485,7 @@ export const CALCULATIONS: Calculation[] = [
       "P(≥ 50 m³) = P(H|R) · (P(major) + P(very major)).",
       "IR_event = P(H|R) · Σ_j P(M_j) · V_j(d_nearest) · protection_j · 0.65 for a ground-floor occupant of the nearest block (or the mid-radius of the census disc).",
       "Return period T of the current 24-h rainfall: log-interpolated through 100 mm → 2 y, 150 → 10, 275 (1972) → 50, 400 → 100, 623 (2008) → 200, 846 (7 Sep 2023) → 1,000, 956 (1994) → 2,000.",
-      "Annual failure probability: storms per year in each R24 class from the return-period table (rate = 1/T(R_i) − 1/T(R_{i+1}); 50–100 mm at 2 a year, assumption) × P(H|R_class) without monitoring evidence, P_annual = 1 − exp(−Σ). IR_annual = IR_event × P_annual / P_event; PLL_annual likewise. Shown against the Hong Kong criteria of 1e-4 /y for existing and 1e-5 /y for new slopes.",
+      "Annual failure probability: storms per year in each R24 class from the return-period table (rate = 1/T(R_i) − 1/T(R_{i+1}); 50–100 mm uses 2 − 1/2 = 1.5 a year, from the assumed exceedance rate above 50 mm minus the rate above 100 mm) × P(H|R_class) without monitoring evidence, P_annual = 1 − exp(−Σ). IR_annual = IR_event × P_annual / P_event; PLL_annual likewise. Shown against the Hong Kong criteria of 1e-4 /y for existing and 1e-5 /y for new slopes.",
     ],
     realness: "derived",
     reference: "Zhang & He (IWDTERM 2026) slide 4 storm table; ERM (1998) risk guidelines as reproduced in GEO Report 195 §5",

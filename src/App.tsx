@@ -12,6 +12,8 @@ import PlanningView from "./components/PlanningView";
 import ReportsView from "./components/ReportsView";
 import AskTwinView from "./components/AskTwinView";
 import { installSliderFill } from "./ui/sliders";
+import { openCalculation } from "./components/ui/Term";
+import { CALCULATIONS, DATA_SOURCES } from "./core/dataSources";
 
 export default function App() {
   const ready = useStore((s) => s.ready);
@@ -40,6 +42,18 @@ export default function App() {
 
   // iOS-style filled range sliders
   useEffect(() => installSliderFill(), []);
+
+  // Shared explanation links work on first load and when following a new fragment.
+  useEffect(() => {
+    if (!ready) return;
+    const followExplanation = () => {
+      const id = window.location.hash.slice(1);
+      if ([...CALCULATIONS, ...DATA_SOURCES].some(entry => entry.id === id)) openCalculation(id);
+    };
+    followExplanation();
+    window.addEventListener("hashchange", followExplanation);
+    return () => window.removeEventListener("hashchange", followExplanation);
+  }, [ready]);
 
   if (!ready) {
     return (
@@ -81,9 +95,9 @@ export default function App() {
             setReportsTab("sources");
             setView("reports");
           }}
-          title="Every dataset, how it is connected, and how fresh it is"
+          title="Search what each metric means, how it is calculated, and where its data comes from"
         >
-          Data sources →
+          Data & explanations →
         </button>
         <button
           className={`banner-link ${whatsNewUnseen ? "glow" : ""}`}

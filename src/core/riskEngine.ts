@@ -254,13 +254,13 @@ export class HeuristicRiskEngine implements RiskEngine {
     const pct = (p: number) => (p >= 0.01 ? `${(p * 100).toFixed(1)} %` : p >= 1e-4 ? `${(p * 100).toFixed(2)} %` : `${p.toExponential(1)}`);
     const explanation = !slope.hasData
       ? `Insufficient data: this slope has no recent instrumentation or survey coverage, so risk cannot be assessed reliably. Field inspection recommended.`
-      : `Risk is ${catLabel} (score ${Math.round(score)}/100). ` +
+        : `Risk is ${catLabel} (score ${Math.round(score)}/100; this score is a ranking, not a percentage chance of failure). ` +
         `With a maximum rolling 24-h rainfall of ${q.r24Mm} mm (return period ~${q.returnPeriodY} y) the per-storm failure probability P(H|R) is ${pct(q.pFailure)} ` +
-        `(statistical correlation for a ${slope.slopeType.replace("-", " ")}: ${pct(q.pFailureBaseline)}; log-odds mainly from ${top.join(" and ")}). ` +
-        `A failure would most likely be ${q.magnitude.reduce((a, b) => (b.p > a.p ? b : a)).label}; P(≥ 50 m³) = ${pct(q.pMajor)}. ` +
-        `Expected fatalities this storm (PLL) ${q.pllEvent.toExponential(1)} (5–95 %: ${q.pll5.toExponential(1)}–${q.pll95.toExponential(1)})` +
+          `(starting estimate for a ${slope.slopeType.replace("-", " ")}: ${pct(q.pFailureBaseline)}; the largest model adjustments come from ${top.join(" and ")}). ` +
+          `If failure occurs, the most likely size group is ${q.magnitude.reduce((a, b) => (b.p > a.p ? b : a)).label}; the chance this storm of a failure involving at least 50 cubic metres is ${pct(q.pMajor)}. ` +
+          `Expected fatalities this storm (PLL, an average across possible outcomes rather than a predicted casualty count): ${q.pllEvent.toExponential(1)} (model 5th–95th percentile range: ${q.pll5.toExponential(1)}–${q.pll95.toExponential(1)})` +
         (q.mostExposedM !== null ? `, individual risk to the nearest resident ${q.irEvent.toExponential(1)} per event (${q.irAnnual.toExponential(1)} /y)` : "") +
-        `. ` +
+          `. The confidence indicator uses simulated data-quality inputs; it is not a measured prediction accuracy. ` +
         (trajectory[3].category !== category
           ? `Projected rainfall moves this slope to ${trajectory[3].category.toUpperCase()} within ~6 h. `
           : `No band change expected in the next 6 h. `) +

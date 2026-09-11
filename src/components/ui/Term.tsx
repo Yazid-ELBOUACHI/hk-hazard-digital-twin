@@ -4,18 +4,25 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { GLOSSARY } from "@/core/glossary";
+import { CALCULATION_GUIDE } from "@/core/calculationGuide";
 import { useStore } from "@/state/store";
 
 /** Navigate to the Data Sources page and scroll to a row id (a CALCULATIONS or DATA_SOURCES id). */
 export function openCalculation(rowId: string): void {
+  const url = new URL(window.location.href);
+  url.hash = rowId;
+  window.history.replaceState(window.history.state, "", url);
   const st = useStore.getState();
   st.openCommandCenter(false);
   st.setReportsTab("sources");
   st.setView("reports");
+  window.dispatchEvent(new Event("reveal-calculation"));
   const started = performance.now();
   const tryScroll = () => {
     const el = document.getElementById(rowId);
     if (el) {
+      el.setAttribute("tabindex", "-1");
+      el.focus({ preventScroll: true });
       el.scrollIntoView({ block: "center", behavior: "smooth" });
       el.classList.remove("calc-flash");
       void el.offsetWidth; // restart the animation
@@ -45,6 +52,8 @@ export default function Term({ id, children, className }: { id: string; children
 
   if (!entry) return <>{children ?? id}</>;
   const target = entry.calc ?? entry.source;
+  const guide = entry.calc ? CALCULATION_GUIDE[entry.calc] : undefined;
+  const explanation = guide ? `${guide.summary} ${guide.interpretation}` : entry.what;
 
   const show = () => {
     const r = ref.current?.getBoundingClientRect();
@@ -68,7 +77,7 @@ export default function Term({ id, children, className }: { id: string; children
           setPos(null);
           if (target) openCalculation(target);
         }}
-        aria-label={`${entry.label}: ${entry.what}`}
+        aria-label={`${entry.label}: ${explanation}`}
       >
         {children ?? entry.label}
       </button>
@@ -76,7 +85,7 @@ export default function Term({ id, children, className }: { id: string; children
         createPortal(
           <div className="term-pop" style={{ left: pos.x, top: pos.above ? undefined : pos.y, bottom: pos.above ? window.innerHeight - pos.y : undefined }} role="tooltip">
             <b>{entry.label}</b>
-            {entry.what}
+            {explanation}
             {target && <span className="go">Click to see how it is calculated →</span>}
           </div>,
           document.body

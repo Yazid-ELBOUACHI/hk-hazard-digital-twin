@@ -28,6 +28,11 @@ export default function EmergencyPanel() {
 
   return (
     <div className="side right em-side">
+      <div className="panel response-guide">
+        <h3>Where would help be needed first?</h3>
+        <p>1. Review the highest-ranked slopes below.<br />2. Select a slope to inspect the evidence.<br />3. Compare the suggested teams and estimated travel times.</p>
+        <p>Teams and incidents here are simulated. Suggestions support a demonstration of response planning; clicking a row only opens a map location.</p>
+      </div>
       {kpi && (
         <div className="panel">
           <h3 style={{ color: "#c98f8f" }}>Situation</h3>
@@ -42,19 +47,20 @@ export default function EmergencyPanel() {
             </div>
             <div className="em-card" style={{ margin: 0, padding: "10px 6px" }}>
               <div className="em-big" style={{ color: "var(--risk-elevated)" }}>{fmtInt(kpi.populationExposed)}</div>
-              <div className="stat-label">People</div>
+              <div className="stat-label">Residents nearby</div>
             </div>
           </div>
           <div style={{ display: "flex", gap: 14, marginTop: 8, fontSize: 11.5, color: "#c98f8f" }}>
             <span>🚧 {kpi.roadsExposed} roads at risk</span>
             <span>🏢 {kpi.buildingsExposed} buildings</span>
-            <span>⚠ {incidents.length} incidents</span>
+            <span>⚠ {incidents.length} simulated incidents</span>
           </div>
         </div>
       )}
 
       <div className="panel">
-        <h3 style={{ color: "#c98f8f" }}>Active Threats</h3>
+        <h3 style={{ color: "#c98f8f" }}>Slopes to review first</h3>
+        {threats.length === 0 && <p>No slopes are currently in the high or critical model bands. This is a model summary, not an all-clear notice.</p>}
         {threats.map(({ s, a }) => (
           <div
             key={s.id}
@@ -78,7 +84,8 @@ export default function EmergencyPanel() {
       </div>
 
       <div className="panel">
-        <h3 style={{ color: "#c98f8f" }}>Recommended Deployments</h3>
+        <h3 style={{ color: "#c98f8f" }}>Suggested team assignments · simulated</h3>
+        {deployments.length === 0 && <p>No team assignments meet the current model criteria.</p>}
         {deployments.map((d) => (
           <div key={d.resource.id} className="alert-row" style={{ background: "#150d0d", alignItems: "flex-start" }} onClick={() => flyToSlope(d.slopeId)}>
             <span style={{ fontSize: 13 }}>
@@ -93,12 +100,12 @@ export default function EmergencyPanel() {
           </div>
         ))}
         <div style={{ fontSize: 10.5, color: "#7c5a5a", marginTop: 6 }}>
-          {RESOURCES.filter((r) => !deployedIds.has(r.id)).length} resources held in reserve · mock prioritization (risk, exposure, uncertainty, travel time)
+          {RESOURCES.filter((r) => !deployedIds.has(r.id)).length} demonstration teams remain unassigned. Suggestions use risk score, nearby residents, model confidence, team type and estimated travel time. No teams have been dispatched.
         </div>
       </div>
 
       <div className="panel">
-        <h3 style={{ color: "#c98f8f" }}>Active Incidents</h3>
+        <h3 style={{ color: "#c98f8f" }}>Simulated incident feed</h3>
         {incidents.map((i) => (
           <div key={i.id} className="alert-row" style={{ background: "#150d0d" }} onClick={() => i.slopeId && flyToSlope(i.slopeId)}>
             <span>{i.kind === "flooding" ? "🌊" : "⛰"}</span>

@@ -234,9 +234,9 @@ export default function MapOverlays() {
 
       {stormMode && mapLoaded && (
         <div className="storm-banner">
-          <b>⛈ {weather?.stormName ?? "Storm scenario"}</b>
-          <span>Heavy band in ~{weather?.stormEtaHours ?? 8} h — map shows projected risk at</span>
-          <input type="range" min={0} max={24} step={1} value={stormHorizonH} onChange={(e) => setStormHorizon(+e.target.value)} />
+          <b>⛈ Simulated storm</b>
+          <span>Fictional rain band in ~{weather?.stormEtaHours ?? 8} h. Preview map risk:</span>
+          <input aria-label="Hours ahead for simulated storm risk" type="range" min={0} max={24} step={1} value={stormHorizonH} onChange={(e) => setStormHorizon(+e.target.value)} />
           <b style={{ fontFamily: "var(--mono)" }}>+{stormHorizonH} h</b>
         </div>
       )}

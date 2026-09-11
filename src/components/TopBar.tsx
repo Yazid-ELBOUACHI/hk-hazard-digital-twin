@@ -1,10 +1,11 @@
 import { useStore, ViewId } from "@/state/store";
 import { fmtClock } from "@/core/format";
 import type { Role } from "@/core/types";
+import { useState } from "react";
 
 const VIEWS: { id: ViewId; label: string; roles: Role[]; hint: string }[] = [
   { id: "overview", label: "Overview", roles: ["public", "engineer", "emergency", "admin"], hint: "City-wide risk map and indicators" },
-  { id: "emergency", label: "Emergency", roles: ["engineer", "emergency", "admin"], hint: "Operations view: threats, deployments, incidents" },
+  { id: "emergency", label: "Response planning", roles: ["engineer", "emergency", "admin"], hint: "Explore which slopes need attention and where demonstration teams could be sent" },
   { id: "planning", label: "Planning", roles: ["engineer", "emergency", "admin"], hint: "Where to spend a fixed mitigation budget" },
   { id: "reports", label: "Reports", roles: ["engineer", "emergency", "admin"], hint: "Situation report and model validation" },
   { id: "ask", label: "Ask the Twin", roles: ["engineer", "emergency", "admin"], hint: "Plain-language questions over the twin state" },
@@ -28,6 +29,7 @@ export default function TopBar() {
   const stormMode = useStore((s) => s.stormMode);
   const setStormMode = useStore((s) => s.setStormMode);
   const weather = useStore((s) => s.weather);
+  const [stormHelp, setStormHelp] = useState(false);
 
   return (
     <div className="topbar">
@@ -52,13 +54,22 @@ export default function TopBar() {
       <div className="spacer" />
 
       {role !== "public" && (
-        <button
-          className={`storm-toggle ${stormMode ? "active" : ""}`}
-          onClick={() => setStormMode(!stormMode)}
-          title={stormMode ? "Storm scenario active — the map shows projected risk. Click to end it." : "Inject a synthetic city-wide rainstorm and preview projected risk"}
-        >
-          {stormMode ? "◉ Storm Watch Active" : "Storm Watch"}
-        </button>
+        <div className="storm-control">
+          <button type="button" className={`storm-toggle ${stormMode ? "active" : ""}`}
+            aria-expanded={stormHelp} aria-controls="storm-explanation" onClick={() => setStormHelp(!stormHelp)}>
+            {stormMode ? "Simulated storm: ON" : "Simulate a storm"}
+          </button>
+          {stormHelp && <section id="storm-explanation" className="storm-explanation" aria-label="About the storm simulation" onKeyDown={e => { if (e.key === "Escape") setStormHelp(false); }}>
+            <h3>What if a heavy storm arrives?</h3>
+            <p>Add a fictional city-wide rainstorm to the rainfall inputs and explore how the modelled slope risks change.</p>
+            <p>On the map, move the forecast-hours slider to compare projected risk over the next 24 hours. Rain and risk panels also include the simulated storm as the platform clock advances.</p>
+            <p>This is a what-if exercise, not an official weather warning or a forecast that this storm will happen.</p>
+            <button type="button" className="chip" onClick={() => { setStormMode(!stormMode); if (!stormMode) setView("overview"); setStormHelp(false); }}>
+              {stormMode ? "Stop simulated storm" : "Start simulated storm"}
+            </button>
+            <button type="button" className="chip" onClick={() => setStormHelp(false)}>Close explanation</button>
+          </section>}
+        </div>
       )}
 
       <div

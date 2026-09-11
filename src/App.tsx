@@ -21,6 +21,8 @@ export default function App() {
   const role = useStore((s) => s.role);
   const commandCenterOpen = useStore((s) => s.commandCenterOpen);
   const sim3dActive = useStore((s) => s.sim3dActive);
+  const stormMode = useStore((s) => s.stormMode);
+  const setStormMode = useStore((s) => s.setStormMode);
   const setView = useStore((s) => s.setView);
   const setReportsTab = useStore((s) => s.setReportsTab);
   const [whatsNewUnseen, setWhatsNewUnseen] = useState(() => !latestSeen());
@@ -114,11 +116,16 @@ export default function App() {
       </div>
       <TopBar />
       {view === "emergency" && (
-        <div className="em-header">
-          <span style={{ animation: "pulse-storm 1.5s infinite", borderRadius: 4, padding: "1px 8px", background: "#7c1d1d" }}>●</span>
-          Emergency Operations Mode — Landslide &amp; Flood Response
+        <div className="em-header response-explanation">
+          <strong>Response planning · demonstration</strong>
+          <span>Decide which slopes to inspect first and explore where teams could be sent. Selecting this view does not declare an emergency or dispatch anyone.</span>
         </div>
       )}
+      {stormMode && <div className="em-header storm-context" role="status">
+        <strong>Simulated storm is active</strong>
+        <span>Rainfall inputs include a fictional storm. Map colours show projected risk at the selected forecast hour.</span>
+        <button type="button" className="chip" onClick={() => setStormMode(false)}>Stop simulated storm</button>
+      </div>}
       <div className="main">
         {(
           <>
